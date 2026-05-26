@@ -1,0 +1,33 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "super-chess",
+  "compatibility_date": "2026-05-26",
+
+  // Run `vite build` before deploy so `npx wrangler deploy` is a one-liner.
+  "build": {
+    "command": "pnpm exec vite build"
+  },
+
+  // Static-only Worker: the bundled Vite app in ./dist is served directly,
+  // SPA fallback to /index.html for unknown paths.
+  "assets": {
+    "directory": "./dist",
+    "not_found_handling": "single-page-application"
+  },
+
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1,
+    "logs": {
+      "invocation_logs": true
+    }
+  }
+
+  // Custom domain (super-chess.bitwiseandrea.com) — uncomment after the
+  // bitwiseandrea.com zone is on Cloudflare and a Worker route/domain is
+  // attached via the CF dashboard or `wrangler` UI:
+  //
+  // "routes": [
+  //   { "pattern": "super-chess.bitwiseandrea.com", "custom_domain": true }
+  // ]
+}

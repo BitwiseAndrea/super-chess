@@ -37,3 +37,7 @@ sim-results/
 
 # TypeScript build info
 *.tsbuildinfo
+
+# Cloudflare Workers (wrangler)
+.wrangler/
+.dev.vars

@@ -126,3 +126,138 @@ Edit `src/config/simulation.config.ts` for default simulation parameters.
 
 - **test.yml**: Runs on every push/PR — lint, test, coverage artifact upload
 - **sim-report.yml**: Nightly at 02:00 UTC — 500-game simulation, Markdown report posted as comment on issue #1
+
+## Deploy (Cloudflare Workers)
+
+The web sim is hosted as a static Worker (Vite SPA in `dist/`, served via `assets`).
+
+One-time setup:
+
+```bash
+npx wrangler login
+```
+
+Every deploy:
+
+```bash
+npx wrangler deploy        # also runs `pnpm exec vite build` first
+# or
+pnpm cf:deploy
+```
+
+Local preview against the Workers runtime (instead of `pnpm dev`):
+
+```bash
+pnpm cf:dev
+```
+
+After first deploy the app is live at `https://super-chess.<account>.workers.dev`. The custom domain `super-chess.bitwiseandrea.com` is wired by uncommenting the `routes` block in `wrangler.jsonc` (requires the `bitwiseandrea.com` zone on Cloudflare).
+
+## Roblox Port (Super Chess Studio Place)
+
+A Roblox Studio version of Super Chess has been bootstrapped via the Studio MCP. The place lives in the **Super Chess** Studio session and re-implements the engine + card layer in Luau, with a 3D graybox board and SurfaceGui card hands. The TS engine and the Luau engine produce **identical perft results through depth 3 (1 / 20 / 400 / 8902)**, so legal-move generation is at parity.
+
+### Layout in Studio
+
+```
+ReplicatedStorage/
+  SuperChess/
+    Modules/
+      Board          ModuleScript -- square <-> rc, piece codes, initial state
+      MoveGen        ModuleScript -- pseudo-legal + legal moves, attack detection
+      Rules          ModuleScript -- Super Chess overrides (frozen, shield, foul, mustMove,
+                                    knightsPath, fortify, game-over)
+      Cards          ModuleScript -- all 20 card definitions (data)
+      Deck           ModuleScript -- draw/discard/hand mgmt
+      CardEffects    ModuleScript -- effect handlers
+      PieceVisuals   ModuleScript -- graybox piece factory (cylinders + blocks)
+    Remotes/
+      StateChanged   RemoteEvent     server -> clients
+      RequestMove    RemoteEvent     client -> server
+      RequestCard    RemoteEvent     client -> server
+      RequestRestart RemoteEvent     client -> server
+      RequestState   RemoteFunction  client -> server (initial sync)
+
+ServerScriptService/
+  SuperChessServer/
+    WorldBuilder   Script        spawns 64-square board, hand panels, status board, lights
+    GameManager    Script        authoritative game loop
+    VisualSync     ModuleScript  syncs Workspace.SuperChess.Pieces + hand SurfaceGuis +
+                                 StatusBoard text/log to a snapshot
+
+StarterPlayer/StarterPlayerScripts/
+  SuperChessClient/
+    Controller     LocalScript   square + card click handling, selection, highlights
+
+StarterGui/
+  SuperChessHUD    ScreenGui     on-screen controls hint
+
+Workspace/SuperChess/
+  Board            Folder of 64 Parts (each 4x4 studs, ClickDetector + SelectionBox)
+  Pieces           Folder of piece Models (Parts as graybox primitives)
+  WhiteHandPanel   Part with SurfaceGui rendering white's hand (2 cards)
+  BlackHandPanel   Part with SurfaceGui rendering black's hand (2 cards)
+  StatusBoard      Part with SurfaceGui showing turn + recent move log
+  Base             wood-colored slab under the board
+```
+
+### How to play
+
+1. Open the **Super Chess** place in Roblox Studio
+2. Press **Play**
+3. Click one of your pieces; legal destinations highlight green
+4. Click a destination to move
+5. Click a card on your hand panel to play it
+   - Single-target cards: click the target square next
+   - Two-target cards (Teleport, Swap, Retreat): click two squares
+   - Disrupt: pick a piece type from the bottom-of-screen picker
+6. Hot-seat: the active player has the turn — switch seats between moves
+7. Press **R** to restart, **Esc** to clear selection
+
+### Feature parity vs the web project
+
+| Feature | Web (TS) | Roblox (Luau) | Notes |
+|---|---|---|---|
+| 8x8 board, FEN parsing | yes | board only (no FEN) | parser not needed in MVP |
+| Legal move gen (perft(3) = 8902) | yes | yes | bit-identical results |
+| Check / checkmate / stalemate | yes | yes | |
+| Castling, en passant, promotion | yes | yes | promotion defaults to queen |
+| 50-move draw, move-limit, repetition | 50 + limit + repetition | 50 + limit | repetition omitted |
+| Card definitions (20 cards) | yes | yes | all 20 ported as data |
+| Card effects implemented | 20/20 | 16/20 | Mirror, Trade, Fog, Time Warp left as placeholders that show "NOT IMPLEMENTED" on the card |
+| Deck draw/discard/reshuffle | yes | yes | Fisher-Yates with Roblox `Random` |
+| Capture-triggered card draw | yes | yes | white still skips first draw to offset first-move advantage |
+| Slow-game card draw (every 6 turns) | yes | yes | |
+| Frozen squares, Shield, Foul Ground | yes | yes | |
+| Knight's Path, Fortify, Ghost Step | yes | yes (Ghost Step uses simple "any-direction" pass) | |
+| Extra Move, Pawn Storm | yes | yes | |
+| Disrupt (must-move type) | yes | yes | type picker UI |
+| 3D world | n/a | yes | graybox parts: cylinders for round pieces, blocks for square pieces |
+| Card UI | HTML/CSS | SurfaceGui on 3D part | one panel per player on the long side of the board |
+| AI (Minimax + Heuristic CardAI) | yes | no | hot-seat only in the Roblox port |
+| Simulation runner (CLI) | yes | no | not applicable in-engine |
+| Stats dashboard | yes | no | StatusBoard shows turn + move log instead |
+
+### Known graybox compromises (called out per the brief)
+
+- Pieces are primitive shapes, not mesh imports — kings/queens are tall blocks/cylinders with accent toppers
+- No piece-move animations (pieces teleport on state change)
+- No SFX or VFX
+- Hand panels are simple SurfaceGuis; no draw/discard animations
+- StatusBoard is a flat 2D label on a Part — no minimap, captured-piece tray, etc.
+
+### Validation done in edit mode through the Studio MCP
+
+- Loaded every ModuleScript via `require` — no syntax errors
+- `perft(1..3)` from the initial position matches the TS engine (20 / 400 / 8902)
+- Played a manual mini-game (e2-e4 / d7-d5 / exd5 / Qxd5 / Nc3 / Qa5) and confirmed:
+  - VisualSync updated piece positions correctly
+  - Capture-triggered card draw fired for black (and was skipped for white as designed)
+- Verified `Knight's Path` on the white queen at d1 yields knight moves c3 / e3 (b2 / f2 blocked by friendly pawns)
+- Verified `Freeze` on b8 prevents the black knight from moving for one black turn and expires afterward
+- Verified `Shield` on e2 makes a capture of e2 return "Target piece is shielded"
+- Verified `Pawn Storm` advances all 8 white pawns one rank
+- Verified `Double Step` moves e2 to e4 in one card play
+- Verified `Foul Ground` on e4 removes black's option to move to e4
+- Verified `Disrupt` with `N` reduces black's legal-move set to only knight moves
+

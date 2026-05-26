@@ -13,9 +13,12 @@
     "format": "prettier --write src tests scripts",
     "sim": "tsx scripts/sim.ts",
     "export-stats": "tsx scripts/export-stats.ts",
-    "benchmark": "tsx scripts/benchmark.ts"
+    "benchmark": "tsx scripts/benchmark.ts",
+    "cf:dev": "wrangler dev",
+    "cf:deploy": "wrangler deploy"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260526.1",
     "@eslint/js": "^10.0.1",
     "@types/d3": "^7.4.3",
     "@typescript-eslint/eslint-plugin": "^8.60.0",
@@ -27,7 +30,8 @@
     "tsx": "^4.22.3",
     "typescript": "~6.0.2",
     "vite": "^8.0.12",
-    "vitest": "^4.1.7"
+    "vitest": "^4.1.7",
+    "wrangler": "^4.95.0"
   },
   "dependencies": {
     "d3": "^7.9.0"
