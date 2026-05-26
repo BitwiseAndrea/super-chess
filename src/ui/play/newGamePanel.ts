@@ -2,11 +2,14 @@
 // Pre-game setup overlay: pick your side and bot difficulty, then start.
 import type { PieceColor } from '../../engine/types.ts';
 import { THEME } from '../theme.ts';
+import { getOpenOpponentHandPref, setOpenOpponentHandPref } from './prefs.ts';
 
 export interface NewGameConfig {
   humanColor: PieceColor;
   botDepth: number;            // 1 = easy, 2 = normal, 3 = hard
   botLabel: string;
+  /** If true, the opponent's hand is shown face-up. Easier / good for learning. */
+  openOpponentHand: boolean;
 }
 
 const DIFFICULTIES: Array<{ key: string; label: string; depth: number; blurb: string }> = [
@@ -95,6 +98,39 @@ export function showNewGamePanel(opts: {
   }
   card.appendChild(sideRow);
 
+  // --- hand visibility picker ---
+  const handLabel = sectionLabel('opponent\u2019s hand');
+  card.appendChild(handLabel);
+
+  let openHand = getOpenOpponentHandPref();
+  const handRow = document.createElement('div');
+  handRow.style.cssText = 'display: flex; gap: 8px; margin-bottom: 24px;';
+  const handOptions: Array<{ key: 'closed' | 'open'; label: string; glyph: string; blurb: string }> = [
+    { key: 'closed', label: 'closed', glyph: '\u{1F0A0}', blurb: 'hidden — classic' },
+    { key: 'open',   label: 'open',   glyph: '\u{1F441}', blurb: 'face\u2011up — easier' },
+  ];
+  const handButtons: HTMLButtonElement[] = [];
+  for (const opt of handOptions) {
+    const btn = document.createElement('button');
+    const isActive = (opt.key === 'open') === openHand;
+    btn.style.cssText = pillStyle(isActive);
+    btn.innerHTML = `
+      <span style="font-size:20px;line-height:1">${opt.glyph}</span>
+      <span>${opt.label}</span>
+      <span style="font-size:10px;letter-spacing:0.04em;color:${THEME.textMuted};margin-top:2px;font-family:system-ui,sans-serif;">${opt.blurb}</span>
+    `;
+    btn.addEventListener('click', () => {
+      openHand = opt.key === 'open';
+      for (let i = 0; i < handButtons.length; i++) {
+        const active = (handOptions[i].key === 'open') === openHand;
+        handButtons[i].style.cssText = pillStyle(active);
+      }
+    });
+    handRow.appendChild(btn);
+    handButtons.push(btn);
+  }
+  card.appendChild(handRow);
+
   // --- difficulty picker ---
   const diffLabel = sectionLabel('bot difficulty');
   card.appendChild(diffLabel);
@@ -131,10 +167,12 @@ export function showNewGamePanel(opts: {
       ? (Math.random() < 0.5 ? 'w' : 'b')
       : selectedSide;
     overlay.remove();
+    setOpenOpponentHandPref(openHand);
     opts.onStart({
       humanColor,
       botDepth: selectedDiff.depth,
       botLabel: selectedDiff.label,
+      openOpponentHand: openHand,
     });
   });
   card.appendChild(startBtn);

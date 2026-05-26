@@ -437,6 +437,11 @@ export const CARD_EFFECTS: Record<string, CardEffectFn> = {
     if (!lastMove) {
       return { newState: state, logEntry: 'Mirror: no last move to mirror', materialDelta: 0 };
     }
+    // Mirror only applies when chess.turn matches the caller. If we got here
+    // mid-turn for some reason, bail.
+    if (state.chess.turn !== color) {
+      return { newState: state, logEntry: 'Mirror: not your turn', materialDelta: 0 };
+    }
     const opp: PieceColor = color === 'w' ? 'b' : 'w';
     const movedPieceType = pieceType(state.chess.board[lastMove.from] ?? (opp + lastMove.color[1]));
     const targetSq = lastMove.to;
@@ -457,7 +462,15 @@ export const CARD_EFFECTS: Record<string, CardEffectFn> = {
 
     const capture = mirror.capture ? pieceValueFor(pieceType(mirror.capture)) : 0;
     const next = cloneSuperState(state);
-    next.chess = applyMove(state.chess, mirror);
+    // Apply the move's board effects but un-toggle turn/full-move so the
+    // runner's consumeTurnBookkeeping can handle them uniformly with other
+    // turn-consuming cards.
+    const afterMove = applyMove(state.chess, mirror);
+    next.chess = {
+      ...afterMove,
+      turn: state.chess.turn,
+      fullMoveNumber: state.chess.fullMoveNumber,
+    };
     if (mirror.capture) {
       next.superState.capturedByColor.get(color)!.push(mirror.capture);
     }

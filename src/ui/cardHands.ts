@@ -77,12 +77,18 @@ export class CardHandsRenderer {
     humanColor: PieceColor;
     selectedCardId?: string | null;
     playable?: boolean;
+    /** If true and side != humanColor, reveal opponent's cards face-up. */
+    reveal?: boolean;
   }): void {
     this.container.innerHTML = '';
     const hand = opts.side === 'w' ? opts.state.deck.hand.white : opts.state.deck.hand.black;
     if (opts.side === opts.humanColor) {
       this.container.appendChild(
-        this.buildOwnHand(opts.side, hand, opts.selectedCardId ?? null, !!opts.playable),
+        this.buildOwnHand(opts.side, hand, opts.selectedCardId ?? null, !!opts.playable, false, 'own'),
+      );
+    } else if (opts.reveal) {
+      this.container.appendChild(
+        this.buildOwnHand(opts.side, hand, null, false, false, 'opp-revealed'),
       );
     } else {
       this.container.appendChild(this.buildOpponentHand(opts.side, hand.length));
@@ -153,24 +159,44 @@ export class CardHandsRenderer {
     selectedId: string | null,
     playable: boolean,
     isSimMode = false,
+    kind: 'own' | 'opp-revealed' | 'sim' = isSimMode ? 'sim' : 'own',
   ): HTMLElement {
     const wrap = document.createElement('div');
+    const dim = kind === 'opp-revealed';
     wrap.style.cssText = `
       display: flex; flex-direction: column; gap: 8px;
       padding: 12px;
       background: ${THEME.panel};
       border: 1px solid ${THEME.border};
       border-radius: 12px;
+      ${dim ? 'box-shadow: inset 0 0 0 1px rgba(244,199,90,0.06);' : ''}
     `;
 
     const label = document.createElement('div');
     label.style.cssText = `
       font-size: 11px; letter-spacing: 0.18em; text-transform: uppercase;
       color: ${THEME.textMuted};
+      display: flex; align-items: center; gap: 8px;
     `;
-    label.textContent = isSimMode
-      ? `${color === 'w' ? 'white' : 'black'} · ${hand.length} card${hand.length === 1 ? '' : 's'}`
-      : `your hand · ${hand.length} card${hand.length === 1 ? '' : 's'}`;
+    const colorName = color === 'w' ? 'white' : 'black';
+    const countTxt = `${hand.length} card${hand.length === 1 ? '' : 's'}`;
+    let labelText: string;
+    if (kind === 'sim') labelText = `${colorName} \u00b7 ${countTxt}`;
+    else if (kind === 'opp-revealed') labelText = `${colorName} (opponent) \u00b7 ${countTxt}`;
+    else labelText = `your hand \u00b7 ${countTxt}`;
+    label.textContent = labelText;
+    if (kind === 'opp-revealed') {
+      const eye = document.createElement('span');
+      eye.textContent = '\u{1F441} revealed';
+      eye.style.cssText = `
+        font-size: 9px; letter-spacing: 0.18em;
+        color: ${THEME.accent};
+        padding: 2px 6px;
+        border: 1px solid rgba(244,199,90,0.4);
+        border-radius: 4px;
+      `;
+      label.appendChild(eye);
+    }
     wrap.appendChild(label);
 
     if (hand.length === 0) {

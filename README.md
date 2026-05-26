@@ -179,6 +179,7 @@ ReplicatedStorage/
       RequestRestart RemoteEvent     client -> server
       RequestState   RemoteFunction  client -> server (initial sync)
       SetBotEnabled  RemoteEvent     client -> server (toggle bot / color / depth)
+      SetHandsOpen   RemoteEvent     client -> server (toggle open / closed hand)
 
 ServerScriptService/
   SuperChessServer/
@@ -216,7 +217,11 @@ Workspace/SuperChess/
 6. **Solo play**: by default the bot plays black at depth 2 — just move and it will reply
 7. Toggle the bot from the HUD (top-left): **ON/OFF**, **Black/White**, **Depth 1/2/3**
 8. **Hot-seat** mode: turn the bot OFF and pass control between players each turn
-9. Press **R** to restart, **Esc** to clear selection
+9. **Hand visibility**: toggle **Hand: CLOSED / OPEN** from the HUD
+   - `CLOSED` (default vs bot): your hand shows full faces, opponent's panel shows card backs + count.
+     In hot-seat (no bot), the panel currently active for the turn shows faces; the other shows backs.
+   - `OPEN`: both panels show every card face-up — handy for kibitzing / debugging.
+10. Press **R** to restart, **Esc** to clear selection
 
 ### Feature parity vs the web project
 
@@ -237,7 +242,8 @@ Workspace/SuperChess/
 | Extra Move, Pawn Storm | yes | yes | |
 | Disrupt (must-move type) | yes | yes | type picker UI |
 | 3D world | n/a | yes | graybox parts: cylinders for round pieces, blocks for square pieces |
-| Card UI | HTML/CSS | SurfaceGui on 3D part | one panel per player on the long side of the board |
+| Card UI | HTML/CSS | SurfaceGui on 3D part | one panel per player on the long side of the board; rarity color band, big icon, name, wrapped description, category footer; new cards tween in with a gold-stroke flash |
+| Open / closed hand | closed in `play`, open in `simulate` | both via in-game toggle | hot-seat closed-hand flips with the turn; bot's hand always hidden when closed |
 | AI (Minimax chess) | yes (TS, depth 2-3) | yes (Luau, depth 1-3 selectable) | alpha-beta with capture-first ordering, ~6ms/move at depth 2 |
 | Heuristic CardAI | yes | no | bot plays only chess moves, not cards |
 | Solo play vs bot | yes | yes | toggle from HUD (default: bot plays black, depth 2) |
@@ -249,7 +255,7 @@ Workspace/SuperChess/
 - Pieces are primitive shapes, not mesh imports — kings/queens are tall blocks/cylinders with accent toppers
 - No piece-move animations (pieces teleport on state change)
 - No SFX or VFX
-- Hand panels are simple SurfaceGuis; no draw/discard animations
+- Hand panels are SurfaceGuis with a card-pop draw animation; no discard animation yet
 - StatusBoard is a flat 2D label on a Part — no minimap, captured-piece tray, etc.
 
 ### Validation done in edit mode through the Studio MCP
@@ -268,4 +274,6 @@ Workspace/SuperChess/
 - Verified `Disrupt` with `N` reduces black's legal-move set to only knight moves
 - Verified bot at depth 2: 6.5 ms average per move over a 10-move test game (sensible openings: develops knights, castles, captures hanging pieces)
 - Verified bot at depth 3: ~60 ms per move from the initial position (still real-time)
+- Verified `SetHandsOpen` flow renders rich card faces on the active side and dark "HIDDEN" backs on the opponent (default vs bot); toggling to OPEN reveals both sides
+- Verified new-card tween fires on each fresh `CardId` via diff against client-side `seenCardIds`
 

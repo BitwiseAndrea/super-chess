@@ -9,7 +9,7 @@ import type { SimulationConfig } from '../simulation/types.ts';
 import { Deck } from '../cards/deck.ts';
 import { buildDeck } from '../cards/definitions.ts';
 import { CARD_EFFECTS } from '../cards/effects.ts';
-import { getSuperChessLegalMoves, checkGameOver } from './rules.ts';
+import { getSuperChessLegalMoves, checkGameOver, consumeTurnBookkeeping } from './rules.ts';
 import {
   applyMove,
   toAlgebraic,
@@ -115,6 +115,10 @@ export class SuperChessGame {
     const hand = this.deck.getHand(color);
     let cardPlayRecord: CardPlayRecord | null = null;
 
+    let consumedTurn = false;
+    let consumeTurnPawnOrCapture = false;
+    let playedCardName: string | null = null;
+
     if (hand.length > 0) {
       const decision = await ai.decide(this.state, color, hand);
       if (decision.shouldPlay && decision.card && decision.target !== undefined) {
@@ -125,6 +129,7 @@ export class SuperChessGame {
             b: totalMaterial(this.state.chess.board, 'b'),
           };
           const result = effectFn(this.state, color, decision.target);
+          const stateChanged = result.newState !== this.state;
           this.state = result.newState;
 
           const matAfter = {
@@ -145,7 +150,6 @@ export class SuperChessGame {
           // Time Warp: stays in hand only after a SUCCESSFUL revert (state changed).
           // If Time Warp was a no-op (already used, state unchanged), remove it so it doesn't loop.
           const isTimeWarp = decision.card.definition.name === 'Time Warp';
-          const stateChanged = result.newState !== this.state;
           if (!isTimeWarp || !stateChanged) {
             this.deck.play(color, decision.card);
           }
@@ -155,9 +159,36 @@ export class SuperChessGame {
             data: cardPlayRecord,
             turn: this.state.chess.fullMoveNumber,
           });
+
+          // Track whether this card consumes the chess-move phase. (Only
+          // when the effect actually changed state — a no-op shouldn't burn
+          // the player's turn.)
+          if (decision.card.definition.consumesTurn && stateChanged) {
+            consumedTurn = true;
+            playedCardName = decision.card.definition.name;
+            // Pawn Storm always moves pawns; Mirror may capture or move a
+            // pawn — easiest signal: treat both as resetting the halfmove
+            // clock to keep 50-move detection sensible.
+            consumeTurnPawnOrCapture = true;
+          }
         }
       }
     }
+
+    if (consumedTurn) {
+      this.state = consumeTurnBookkeeping(this.state, color, {
+        pawnMovedOrCaptured: consumeTurnPawnOrCapture,
+      });
+      this.state.deck = this.deck.getState();
+      this.recordPosition();
+      return {
+        move: null as unknown as ReturnType<typeof this.annotate>,
+        cardPlayed: cardPlayRecord,
+        cardDrawn: null,
+        stateAfter: this.state,
+      };
+    }
+    void playedCardName;
 
     // --- Chess move phase ---
     const legalMoves = getSuperChessLegalMoves(this.state, color);

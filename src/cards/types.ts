@@ -12,6 +12,9 @@ export interface CardDefinition {
   rulesText: string;
   requiresTarget: boolean;
   targetType?: 'square' | 'ownPiece' | 'oppPiece' | 'pieceType' | 'pawn';
+  /** If true, playing this card IS the player's entire turn — the chess-move
+   * phase is skipped. (Pawn Storm, Mirror.) */
+  consumesTurn?: boolean;
 }
 
 export interface CardInstance {

@@ -202,6 +202,34 @@ export function tickSuperState(ss: SuperState): SuperState {
   return next;
 }
 
+/**
+ * Apply end-of-turn bookkeeping when a card consumes the entire turn (no
+ * chess-move phase): toggle chess.turn, increment fullMoveNumber as needed,
+ * tick freeze/shield/etc., bump turnsSinceCapture, and clear en-passant.
+ *
+ * Returns a new state — caller must use the return value.
+ */
+export function consumeTurnBookkeeping(
+  state: SuperChessState,
+  playedBy: PieceColor,
+  options: { pawnMovedOrCaptured: boolean },
+): SuperChessState {
+  const nextTurn: PieceColor = playedBy === 'w' ? 'b' : 'w';
+  const chess = {
+    ...state.chess,
+    turn: nextTurn,
+    enPassantSquare: null,
+    halfMoveClock: options.pawnMovedOrCaptured ? 0 : state.chess.halfMoveClock + 1,
+    fullMoveNumber: playedBy === 'b' ? state.chess.fullMoveNumber + 1 : state.chess.fullMoveNumber,
+  };
+  let superState: SuperState = {
+    ...state.superState,
+    turnsSinceCapture: state.superState.turnsSinceCapture + 1,
+  };
+  superState = tickSuperState(superState);
+  return { ...state, chess, superState };
+}
+
 export function clearMovedPieceShield(ss: SuperState, from: Square): SuperState {
   if (!ss.shieldedSquares.has(from)) return ss;
   const next = { ...ss, shieldedSquares: new Map(ss.shieldedSquares), shieldTurns: new Map(ss.shieldTurns) };

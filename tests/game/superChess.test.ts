@@ -24,7 +24,7 @@ describe('SuperChessGame', () => {
     const game = new SuperChessGame(makeConfig(1, 42));
     const result = await game.runToCompletion();
     expect(result).toBeDefined();
-    expect(result.reason).toMatch(/checkmate|stalemate|50-move|move-limit/);
+    expect(result.reason).toMatch(/checkmate|stalemate|50-move|move-limit|repetition/);
     expect(result.totalMoves).toBeGreaterThan(0);
   }, 30000);
 

@@ -91,10 +91,11 @@ export const CARD_DEFINITIONS: CardDefinition[] = [
     category: 'movement',
     copies: 3,
     emoji: '🌊',
-    shortDesc: 'Advance all your pawns 1 square.',
+    shortDesc: 'Advance all your pawns 1 square. (Entire turn.)',
     rulesText:
       "This is your entire move for the turn. Advance every one of your pawns forward one square, but only those that can legally move (not blocked). Pawns that would promote do so automatically (promoting to queen). This cannot leave your king in check.",
     requiresTarget: false,
+    consumesTurn: true,
   },
   {
     name: 'Promotion Rush',
@@ -198,10 +199,11 @@ export const CARD_DEFINITIONS: CardDefinition[] = [
     category: 'chaos',
     copies: 1,
     emoji: '🪞',
-    shortDesc: "Copy your opponent's last move with one of your own pieces.",
+    shortDesc: "Copy your opponent's last move with one of your own pieces. (Entire turn.)",
     rulesText:
-      "Replay your opponent's last chess move using one of your pieces of the same type. If the exact destination is occupied, find the nearest legal alternative. If no mirroring is possible, the card is wasted and discarded.",
+      "Replay your opponent's last chess move using one of your pieces of the same type. If the exact destination is occupied, find the nearest legal alternative. If no mirroring is possible, the card is wasted and discarded. This is your entire move for the turn.",
     requiresTarget: false,
+    consumesTurn: true,
   },
   {
     name: 'Trade',

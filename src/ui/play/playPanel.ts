@@ -12,6 +12,7 @@ import { PlayController, type PlayViewModel } from './playController.ts';
 import { MinimaxAI } from '../../ai/minimaxAI.ts';
 import { HeuristicCardAI } from '../../ai/heuristicCardAI.ts';
 import { showNewGamePanel, type NewGameConfig } from './newGamePanel.ts';
+import { setOpenOpponentHandPref } from './prefs.ts';
 import { THEME } from '../theme.ts';
 
 export function renderPlayMode(root: HTMLElement): void {
@@ -25,6 +26,8 @@ export function renderPlayMode(root: HTMLElement): void {
 
 function mountGame(root: HTMLElement, cfg: NewGameConfig): void {
   root.innerHTML = '';
+  // Local copy so the user can toggle reveal mid-game.
+  let revealOpponent = cfg.openOpponentHand;
   const layout = buildLayout(root, cfg);
 
   layout.newGameBtn.addEventListener('click', () => {
@@ -33,10 +36,25 @@ function mountGame(root: HTMLElement, cfg: NewGameConfig): void {
     }
   });
 
+  layout.handToggleBtn.addEventListener('click', () => {
+    revealOpponent = !revealOpponent;
+    setOpenOpponentHandPref(revealOpponent);
+    updateHandToggle(layout.handToggleBtn, revealOpponent);
+    controller.requestRender();
+  });
+  updateHandToggle(layout.handToggleBtn, revealOpponent);
+
+  // Higher difficulty gets a longer minimum think time so it feels more
+  // deliberate. (Depth 3 search often exceeds these anyway.)
+  const thinkByDepth = { 1: 550, 2: 800, 3: 1100 } as const;
+  const minThink = thinkByDepth[cfg.botDepth as 1 | 2 | 3] ?? 800;
+
   const controller = new PlayController({
     humanColor: cfg.humanColor,
     chessAI: new MinimaxAI(cfg.botDepth),
     cardAI: new HeuristicCardAI(),
+    botMinThinkMs: minThink,
+    humanMoveSettleMs: 280,
     onRequestNewGame: () => renderPlayMode(root),
   });
 
@@ -72,6 +90,7 @@ function mountGame(root: HTMLElement, cfg: NewGameConfig): void {
       state: vm.state,
       side: vm.humanColor === 'w' ? 'b' : 'w',
       humanColor: vm.humanColor,
+      reveal: revealOpponent,
     });
     youHand.renderSide({
       state: vm.state,
@@ -103,6 +122,7 @@ interface Layout {
   turnIndicator: HTMLElement;
   botLabel: HTMLElement;
   newGameBtn: HTMLElement;
+  handToggleBtn: HTMLButtonElement;
   board: HTMLElement;
   oppCaptured: HTMLElement;
   youCaptured: HTMLElement;
@@ -157,6 +177,11 @@ function buildLayout(root: HTMLElement, cfg: NewGameConfig): Layout {
   const spacer = document.createElement('div');
   spacer.style.flex = '1';
   header.appendChild(spacer);
+
+  const handToggleBtn = document.createElement('button');
+  handToggleBtn.className = 'sc-btn';
+  handToggleBtn.title = 'Show / hide the opponent\u2019s cards';
+  header.appendChild(handToggleBtn);
 
   const newGameBtn = document.createElement('button');
   newGameBtn.className = 'sc-btn';
@@ -286,9 +311,10 @@ function buildLayout(root: HTMLElement, cfg: NewGameConfig): Layout {
     font-family: system-ui, sans-serif;
   `;
   tip.innerHTML = `
-    <strong style="color:${THEME.textSecondary};font-weight:500;">tip ·</strong>
+    <strong style="color:${THEME.textSecondary};font-weight:500;">tip \u00b7</strong>
     Click a piece to see legal moves. Click a card to play it (then click its
-    target on the board). Click a card again to cancel.
+    target on the board). Click a card again to cancel. Use the
+    <em>hand</em> button up top to peek at the bot\u2019s cards.
   `;
   sidePanel.appendChild(tip);
 
@@ -297,10 +323,17 @@ function buildLayout(root: HTMLElement, cfg: NewGameConfig): Layout {
   youLabel.textContent = cfg.humanColor === 'w' ? '♔  white (you)' : '♚  black (you)';
 
   return {
-    header, turnIndicator, botLabel, newGameBtn,
+    header, turnIndicator, botLabel, newGameBtn, handToggleBtn,
     board, oppCaptured, youCaptured, oppLabel, youLabel,
     oppHand, youHand, log, banner,
   };
+}
+
+function updateHandToggle(btn: HTMLButtonElement, revealed: boolean): void {
+  btn.innerHTML = revealed
+    ? '\u{1F441} hand: open'
+    : '\u{1F0A0} hand: closed';
+  btn.setAttribute('aria-pressed', revealed ? 'true' : 'false');
 }
 
 function updateHeader(layout: Layout, vm: PlayViewModel, cfg: NewGameConfig): void {
@@ -327,7 +360,15 @@ function updateHeader(layout: Layout, vm: PlayViewModel, cfg: NewGameConfig): vo
       text.textContent = 'your move';
     }
   } else {
-    text.textContent = vm.botThinking ? 'opponent thinking…' : 'opponent move';
+    if (vm.botThinking) {
+      text.appendChild(document.createTextNode('opponent thinking'));
+      const dots = document.createElement('span');
+      dots.className = 'sc-think-dots';
+      dots.innerHTML = '<span>·</span><span>·</span><span>·</span>';
+      text.appendChild(dots);
+    } else {
+      text.textContent = 'opponent move';
+    }
   }
   layout.turnIndicator.appendChild(text);
 
@@ -336,8 +377,21 @@ function updateHeader(layout: Layout, vm: PlayViewModel, cfg: NewGameConfig): vo
     const sty = document.createElement('style');
     sty.id = 'sc-anims';
     sty.textContent = `
-      @keyframes scPulse { 0%, 100% { opacity: 0.6 } 50% { opacity: 1 } }
+      @keyframes scPulse { 0%, 100% { opacity: 0.55; transform: scale(0.85) } 50% { opacity: 1; transform: scale(1.15) } }
       @keyframes scFade  { from { opacity: 0 } to { opacity: 1 } }
+      @keyframes scBlink { 0%, 80%, 100% { opacity: 0.25 } 40% { opacity: 1 } }
+      .sc-think-dots {
+        display: inline-flex; gap: 2px; margin-left: 4px;
+        letter-spacing: 1px; font-weight: 700;
+      }
+      .sc-think-dots span {
+        display: inline-block;
+        animation: scBlink 1.1s ease-in-out infinite;
+        opacity: 0.25;
+      }
+      .sc-think-dots span:nth-child(1) { animation-delay: 0s; }
+      .sc-think-dots span:nth-child(2) { animation-delay: 0.18s; }
+      .sc-think-dots span:nth-child(3) { animation-delay: 0.36s; }
     `;
     document.head.appendChild(sty);
   }

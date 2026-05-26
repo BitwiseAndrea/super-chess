@@ -26,6 +26,7 @@ import {
   checkGameOver,
   tickSuperState,
   clearMovedPieceShield,
+  consumeTurnBookkeeping,
 } from '../../game/rules.ts';
 import { destinationsFor } from '../board.ts';
 import { showPromotionPicker, showPieceTypePicker, showGameOverModal } from './modals.ts';
@@ -35,6 +36,11 @@ export interface PlayConfig {
   chessAI: ChessAI;            // bot
   cardAI: CardAI;              // bot
   maxMoves?: number;           // default 200
+  /** Min total ms between "bot's turn starts" and "bot's move appears".
+   * Lets fast searches (depth 1) still feel deliberate. Default 700. */
+  botMinThinkMs?: number;
+  /** Pause after the human's move before the bot starts thinking. Default 260. */
+  humanMoveSettleMs?: number;
   onRequestNewGame?: () => void; // called when user picks "new game" in the game-over modal
 }
 
@@ -85,7 +91,12 @@ export class PlayController {
   private listeners: Array<(vm: PlayViewModel) => void> = [];
 
   constructor(cfg: PlayConfig) {
-    this.cfg = { maxMoves: 200, ...cfg };
+    this.cfg = {
+      maxMoves: 200,
+      botMinThinkMs: 700,
+      humanMoveSettleMs: 260,
+      ...cfg,
+    };
     const definitions = buildDeck();
     this.deck = new Deck(definitions);
     this.deck.shuffle();
@@ -292,12 +303,25 @@ export class PlayController {
 
     this.cardPhase = { kind: 'none' };
     this.selectedSquare = null;
-    this.emit();
 
-    // Pawn Storm / Time Warp / Mirror / Trade etc. don't skip the move phase
-    // in this engine — the user still needs to make a chess move next.
-    // (Mirror does mutate the board as if it moved, but the engine doesn't
-    // currently end the turn — keep behavior consistent with the sim.)
+    // Cards marked consumesTurn (Pawn Storm, Mirror) ARE the player's whole
+    // turn — skip the chess-move phase, advance the turn, and hand off to
+    // the bot.
+    if (card.definition.consumesTurn) {
+      this.state = consumeTurnBookkeeping(this.state, color, {
+        pawnMovedOrCaptured: true,
+      });
+      this.recordPosition();
+      this.emit();
+
+      if (this.detectGameOver()) return;
+      // Hand off to the bot — same settle pause as a normal move.
+      await microPause(this.cfg.humanMoveSettleMs ?? 260);
+      await this.runBotTurn();
+      return;
+    }
+
+    this.emit();
   }
 
   private async applyHumanMove(move: Move): Promise<void> {
@@ -317,19 +341,25 @@ export class PlayController {
       return;
     }
 
+    // Let the human's move land visually before the bot reacts.
+    await microPause(this.cfg.humanMoveSettleMs ?? 260);
+
     await this.runBotTurn();
   }
 
   private async runBotTurn(): Promise<void> {
+    const startTime = performance.now();
     this.botThinking = true;
     this.emit();
 
     const color: PieceColor = this.cfg.humanColor === 'w' ? 'b' : 'w';
 
-    // Small delay so UI updates before the AI blocks the main thread.
-    await microPause(40);
+    // Small delay so the "thinking" indicator paints before the AI starts.
+    await microPause(60);
 
-    // Card phase.
+    // Card phase. We commit the card play immediately (so the player sees
+    // the board state change), pause a beat, then move on to the chess move.
+    let botConsumedTurn = false;
     const hand = this.deck.getHand(color);
     if (hand.length > 0) {
       try {
@@ -358,13 +388,33 @@ export class PlayController {
               }
               this.flashBanner(`opponent played ${decision.card.definition.emoji} ${decision.card.definition.name}`);
               this.emit();
-              await microPause(380);
+              // Bigger pause for cards — they're a "big moment" worth lingering on.
+              await microPause(620);
+
+              if (decision.card.definition.consumesTurn) {
+                botConsumedTurn = true;
+                this.state = consumeTurnBookkeeping(this.state, color, {
+                  pawnMovedOrCaptured: true,
+                });
+                this.recordPosition();
+              }
             }
           }
         }
       } catch (err) {
         console.warn('[bot card decision]', err);
       }
+    }
+
+    if (botConsumedTurn) {
+      // Respect the minimum think time even when there's no chess-move.
+      const elapsed = performance.now() - startTime;
+      const min = this.cfg.botMinThinkMs ?? 700;
+      if (elapsed < min) await microPause(min - elapsed);
+      this.botThinking = false;
+      if (this.detectGameOver()) return;
+      this.emit();
+      return;
     }
 
     // Chess move phase.
@@ -385,8 +435,15 @@ export class PlayController {
       move = legal[0];
     }
 
-    this.commitMove(move);
+    // Enforce a minimum total think time so the bot never snap-responds —
+    // depth-1 minimax often returns in under 10ms which feels disrespectful.
+    const elapsed = performance.now() - startTime;
+    const min = this.cfg.botMinThinkMs ?? 700;
+    if (elapsed < min) {
+      await microPause(min - elapsed);
+    }
 
+    this.commitMove(move);
     this.botThinking = false;
 
     if (this.detectGameOver()) return;
@@ -660,6 +717,12 @@ export class PlayController {
       banner: this.banner,
       checkSquare: checkSq,
     };
+  }
+
+  /** Force-emit the current view-model (use after external state, e.g. UI
+   * preferences, changes — does not mutate game state). */
+  requestRender(): void {
+    this.emit();
   }
 
   private emit(): void {
