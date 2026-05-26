@@ -1,0 +1,47 @@
+name: Nightly Simulation Report
+on:
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      games:
+        description: 'Number of games to simulate'
+        default: '500'
+
+jobs:
+  simulate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v3
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - run: pnpm install
+
+      - name: Run simulation
+        run: pnpm sim --games ${{ github.event.inputs.games || '500' }} --depth 2 --output sim-results/nightly.json
+
+      - name: Export markdown report
+        run: pnpm export-stats --input sim-results/nightly.json --format markdown > report.md
+
+      - name: Upload simulation results
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-sim-results
+          path: sim-results/
+
+      - name: Post results as issue comment
+        uses: peter-evans/create-or-update-comment@v4
+        if: github.event_name == 'schedule'
+        with:
+          issue-number: 1
+          body-path: report.md
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

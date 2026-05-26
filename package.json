@@ -1,0 +1,35 @@
+{
+  "name": "super-chess",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "test": "vitest",
+    "test:coverage": "vitest --coverage",
+    "lint": "eslint src tests scripts",
+    "format": "prettier --write src tests scripts",
+    "sim": "tsx scripts/sim.ts",
+    "export-stats": "tsx scripts/export-stats.ts",
+    "benchmark": "tsx scripts/benchmark.ts"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/d3": "^7.4.3",
+    "@typescript-eslint/eslint-plugin": "^8.60.0",
+    "@typescript-eslint/parser": "^8.60.0",
+    "@vitest/coverage-v8": "^4.1.7",
+    "eslint": "^10.4.0",
+    "eslint-config-prettier": "^10.1.8",
+    "prettier": "^3.8.3",
+    "tsx": "^4.22.3",
+    "typescript": "~6.0.2",
+    "vite": "^8.0.12",
+    "vitest": "^4.1.7"
+  },
+  "dependencies": {
+    "d3": "^7.9.0"
+  }
+}
