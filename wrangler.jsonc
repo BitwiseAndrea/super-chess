@@ -21,13 +21,11 @@
     "logs": {
       "invocation_logs": true
     }
-  }
+  },
 
-  // Custom domain (super-chess.bitwiseandrea.com) — uncomment after the
-  // bitwiseandrea.com zone is on Cloudflare and a Worker route/domain is
-  // attached via the CF dashboard or `wrangler` UI:
-  //
-  // "routes": [
-  //   { "pattern": "super-chess.bitwiseandrea.com", "custom_domain": true }
-  // ]
+  // bitwiseandrea.com is on Cloudflare DNS, so wrangler will create the
+  // proxied DNS record + SSL cert automatically on `wrangler deploy`.
+  "routes": [
+    { "pattern": "super-chess.bitwiseandrea.com", "custom_domain": true }
+  ]
 }

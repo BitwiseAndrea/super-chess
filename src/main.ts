@@ -1,132 +1,122 @@
-// Super Chess main entry point
-import { injectTheme, BoardRenderer, CardHandsRenderer, GameLogRenderer, StatsDashboard, ControlsPanel } from './ui/index.ts';
-import { MinimaxAI } from './ai/minimaxAI.ts';
-import { HeuristicCardAI } from './ai/heuristicCardAI.ts';
-import { SimulationRunner } from './simulation/runner.ts';
-import { StatsCollector } from './simulation/stats.ts';
-import type { SimulationConfig } from './simulation/types.ts';
-import type { AggregatedStats } from './simulation/types.ts';
-import { parseFEN, STARTING_FEN } from './engine/fen.ts';
-import { createSuperState } from './game/types.ts';
-import { buildDeck } from './cards/definitions.ts';
-import { Deck } from './cards/deck.ts';
+// src/main.ts
+// Top-level entry: a tabbed shell that switches between the user-facing
+// Play mode (default), the all-cards reference, and the simulation tool.
+
+import { injectTheme, THEME } from './ui/theme.ts';
+import { renderPlayMode } from './ui/play/playPanel.ts';
+import { renderCardsReference } from './ui/play/cardsReference.ts';
+import { renderSimulateMode } from './ui/play/simulateMode.ts';
 
 injectTheme();
 
+type TabKey = 'play' | 'cards' | 'simulate';
+const TABS: Array<{ key: TabKey; label: string }> = [
+  { key: 'play',     label: 'play' },
+  { key: 'cards',    label: 'cards' },
+  { key: 'simulate', label: 'simulate' },
+];
+
+function readTabFromHash(): TabKey {
+  const h = window.location.hash.replace('#', '').trim();
+  if (h === 'cards' || h === 'simulate' || h === 'play') return h;
+  return 'play';
+}
+
 const app = document.getElementById('app')!;
-app.style.cssText = `
-  display: grid;
-  grid-template-areas:
-    "board hands stats"
-    "board log   stats"
-    "ctrl  ctrl  ctrl";
-  grid-template-columns: 420px 300px 1fr;
-  grid-template-rows: auto 1fr auto;
-  gap: 12px; padding: 12px; min-height: 100vh;
+app.style.minHeight = '100vh';
+
+const shell = document.createElement('div');
+shell.style.cssText = 'display: flex; flex-direction: column; min-height: 100vh;';
+app.appendChild(shell);
+
+// --- top nav ----------------------------------------------------------------
+const nav = document.createElement('nav');
+nav.style.cssText = `
+  position: sticky; top: 0; z-index: 50;
+  display: flex; align-items: center; gap: 18px;
+  padding: 12px clamp(16px, 4vw, 32px);
+  background: rgba(20, 14, 10, 0.75);
+  border-bottom: 1px solid ${THEME.borderSoft};
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
 `;
+shell.appendChild(nav);
 
-function makeDiv(area: string): HTMLDivElement {
-  const d = document.createElement('div');
-  d.style.gridArea = area;
-  app.appendChild(d);
-  return d;
+const brand = document.createElement('a');
+brand.href = '#play';
+brand.style.cssText = `
+  display: inline-flex; align-items: center; gap: 8px;
+  font-size: 16px; font-weight: 500;
+  color: ${THEME.textPrimary};
+  text-decoration: none;
+  letter-spacing: 0.02em;
+`;
+brand.innerHTML = `<span style="font-size:18px;">♛</span> super chess`;
+nav.appendChild(brand);
+
+const tabRow = document.createElement('div');
+tabRow.style.cssText = 'display: flex; gap: 6px; margin-left: 12px;';
+nav.appendChild(tabRow);
+
+const tabButtons = new Map<TabKey, HTMLButtonElement>();
+for (const t of TABS) {
+  const btn = document.createElement('button');
+  btn.dataset.tab = t.key;
+  btn.textContent = t.label;
+  btn.style.cssText = tabStyle(false);
+  btn.addEventListener('click', () => {
+    window.location.hash = t.key;
+  });
+  tabRow.appendChild(btn);
+  tabButtons.set(t.key, btn);
 }
 
-const boardContainer = makeDiv('board');
-const handsContainer = makeDiv('hands');
-const logContainer = makeDiv('log');
-const statsContainer = makeDiv('stats');
-const controlsContainer = makeDiv('ctrl');
+const spacer = document.createElement('div');
+spacer.style.flex = '1';
+nav.appendChild(spacer);
 
-const boardRenderer = new BoardRenderer(boardContainer);
-const handsRenderer = new CardHandsRenderer(handsContainer);
-const logRenderer = new GameLogRenderer(logContainer);
-const statsRenderer = new StatsDashboard(statsContainer);
-const controls = new ControlsPanel(controlsContainer);
+const ghLink = document.createElement('a');
+ghLink.href = 'https://github.com/BitwiseAndrea/super-chess';
+ghLink.target = '_blank';
+ghLink.rel = 'noreferrer';
+ghLink.style.cssText = `
+  font-size: 12px; letter-spacing: 0.14em; text-transform: uppercase;
+  color: ${THEME.textMuted};
+  text-decoration: none;
+`;
+ghLink.textContent = 'github →';
+ghLink.addEventListener('mouseenter', () => { ghLink.style.color = THEME.textSecondary; });
+ghLink.addEventListener('mouseleave', () => { ghLink.style.color = THEME.textMuted; });
+nav.appendChild(ghLink);
 
-let runner: SimulationRunner | null = null;
-let statsCollector = new StatsCollector();
+// --- main page area ---------------------------------------------------------
+const main = document.createElement('main');
+main.style.cssText = 'flex: 1; min-height: 0;';
+shell.appendChild(main);
 
-controls.onRun = async (cfg) => {
-  const chessAI = new MinimaxAI(cfg.depth);
-  const cardAI = new HeuristicCardAI();
+function tabStyle(active: boolean): string {
+  return `
+    padding: 7px 16px;
+    border-radius: 999px;
+    background: ${active ? 'rgba(244, 199, 90, 0.16)' : 'transparent'};
+    border: 1px solid ${active ? THEME.accent : 'transparent'};
+    color: ${active ? THEME.textPrimary : THEME.textMuted};
+    font-size: 13px;
+    letter-spacing: 0.06em;
+    transition: all 200ms ease;
+    cursor: pointer;
+    font-family: inherit;
+  `;
+}
 
-  const simConfig: SimulationConfig = {
-    games: cfg.games,
-    chessAI: { white: chessAI, black: chessAI },
-    cardAI: { white: cardAI, black: cardAI },
-    searchDepth: cfg.depth,
-    speedMs: cfg.speed === 'instant' ? 0 : 200,
-    maxMovesPerGame: 200,
-  };
-
-  statsCollector = new StatsCollector();
-  runner = new SimulationRunner(simConfig);
-  controls.setRunning(true);
-  controls.setProgress(0, cfg.games);
-  logRenderer.reset();
-
-  let gamesDone = 0;
-  for await (const { game, stats } of runner.run()) {
-    gamesDone++;
-    statsCollector.addGame(game);
-    statsRenderer.render(stats);
-    controls.setProgress(gamesDone, cfg.games);
-    // Show the last position of the completed game
-    const lastState = runner.lastState;
-    if (lastState) {
-      boardRenderer.render(lastState);
-      handsRenderer.render(lastState);
-      logRenderer.render(lastState);
-    }
+function renderTab(key: TabKey): void {
+  for (const [k, btn] of tabButtons) {
+    btn.style.cssText = tabStyle(k === key);
   }
-
-  controls.setRunning(false);
-  statsRenderer.render(statsCollector.getStats());
-};
-
-controls.onPause = () => runner?.pause();
-controls.onStop = () => { runner?.stop(); controls.setRunning(false); };
-
-// Click a move in the log → show that board position
-logRenderer.onMoveClick = (chess) => boardRenderer.renderChess(chess);
-
-controls.onExportJSON = () => {
-  const data = statsCollector.exportJSON();
-  downloadFile('sim-results.json', data, 'application/json');
-};
-
-controls.onExportCSV = () => {
-  downloadFile('sim-results.csv', statsCollector.exportCSV(), 'text/csv');
-};
-
-function downloadFile(filename: string, content: string, type: string): void {
-  const blob = new Blob([content], { type });
-  const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: filename });
-  a.click();
-  URL.revokeObjectURL(a.href);
+  if (key === 'play') renderPlayMode(main);
+  else if (key === 'cards') renderCardsReference(main);
+  else renderSimulateMode(main);
 }
 
-// Initial board render
-const initialDeck = new Deck(buildDeck());
-const initialState = {
-  chess: parseFEN(STARTING_FEN),
-  deck: initialDeck.getState(),
-  superState: createSuperState(),
-  history: [],
-  result: null,
-  snapshots: [],
-};
-
-boardRenderer.render(initialState);
-handsRenderer.render(initialState);
-logRenderer.render(initialState);
-const emptyStats: AggregatedStats = {
-  totalGames: 0, whiteWins: 0, blackWins: 0, draws: 0,
-  winRates: { white: 0, black: 0, draw: 0 },
-  avgGameLength: 0, medianGameLength: 0,
-  avgCardsDrawnPerGame: 0, avgCardsPlayedPerGame: 0, cardUtilizationRate: 0,
-  perCard: new Map(),
-};
-statsRenderer.render(emptyStats);
-
+window.addEventListener('hashchange', () => renderTab(readTabFromHash()));
+renderTab(readTabFromHash());

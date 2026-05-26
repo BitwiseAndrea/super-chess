@@ -171,12 +171,14 @@ ReplicatedStorage/
       Deck           ModuleScript -- draw/discard/hand mgmt
       CardEffects    ModuleScript -- effect handlers
       PieceVisuals   ModuleScript -- graybox piece factory (cylinders + blocks)
+      Bot            ModuleScript -- alpha-beta minimax bot (depth 1-3, capture-first ordering)
     Remotes/
       StateChanged   RemoteEvent     server -> clients
       RequestMove    RemoteEvent     client -> server
       RequestCard    RemoteEvent     client -> server
       RequestRestart RemoteEvent     client -> server
       RequestState   RemoteFunction  client -> server (initial sync)
+      SetBotEnabled  RemoteEvent     client -> server (toggle bot / color / depth)
 
 ServerScriptService/
   SuperChessServer/
@@ -211,8 +213,10 @@ Workspace/SuperChess/
    - Single-target cards: click the target square next
    - Two-target cards (Teleport, Swap, Retreat): click two squares
    - Disrupt: pick a piece type from the bottom-of-screen picker
-6. Hot-seat: the active player has the turn — switch seats between moves
-7. Press **R** to restart, **Esc** to clear selection
+6. **Solo play**: by default the bot plays black at depth 2 — just move and it will reply
+7. Toggle the bot from the HUD (top-left): **ON/OFF**, **Black/White**, **Depth 1/2/3**
+8. **Hot-seat** mode: turn the bot OFF and pass control between players each turn
+9. Press **R** to restart, **Esc** to clear selection
 
 ### Feature parity vs the web project
 
@@ -234,7 +238,9 @@ Workspace/SuperChess/
 | Disrupt (must-move type) | yes | yes | type picker UI |
 | 3D world | n/a | yes | graybox parts: cylinders for round pieces, blocks for square pieces |
 | Card UI | HTML/CSS | SurfaceGui on 3D part | one panel per player on the long side of the board |
-| AI (Minimax + Heuristic CardAI) | yes | no | hot-seat only in the Roblox port |
+| AI (Minimax chess) | yes (TS, depth 2-3) | yes (Luau, depth 1-3 selectable) | alpha-beta with capture-first ordering, ~6ms/move at depth 2 |
+| Heuristic CardAI | yes | no | bot plays only chess moves, not cards |
+| Solo play vs bot | yes | yes | toggle from HUD (default: bot plays black, depth 2) |
 | Simulation runner (CLI) | yes | no | not applicable in-engine |
 | Stats dashboard | yes | no | StatusBoard shows turn + move log instead |
 
@@ -260,4 +266,6 @@ Workspace/SuperChess/
 - Verified `Double Step` moves e2 to e4 in one card play
 - Verified `Foul Ground` on e4 removes black's option to move to e4
 - Verified `Disrupt` with `N` reduces black's legal-move set to only knight moves
+- Verified bot at depth 2: 6.5 ms average per move over a 10-move test game (sensible openings: develops knights, castles, captures hanging pieces)
+- Verified bot at depth 3: ~60 ms per move from the initial position (still real-time)
 
