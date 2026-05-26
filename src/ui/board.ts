@@ -31,10 +31,24 @@ export class BoardRenderer {
   private sqSize = 60;
   private handlers: BoardClickHandlers = {};
   private interactive: boolean;
+  /** Last board we rendered — used to diff against the new board so we can
+   * animate every piece movement (including card-induced ones like Trade,
+   * Teleport, Swap, Pawn Storm). */
+  private prevBoard: (string | null)[] | null = null;
+  /** Squares we should NOT paint a piece on this frame (because an
+   * animated overlay is mid-flight, e.g. the destination of a slide). */
+  private suppressedSquares = new Set<Square>();
+  private animationsEnabled = true;
 
-  constructor(container: HTMLElement, options: { interactive?: boolean } = {}) {
+  constructor(container: HTMLElement, options: { interactive?: boolean; animations?: boolean } = {}) {
     this.container = container;
     this.interactive = options.interactive ?? false;
+    // Default animations on, but disable when the OS prefers reduced motion.
+    const prefersReduced =
+      typeof window !== 'undefined' &&
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    this.animationsEnabled = (options.animations ?? true) && !prefersReduced;
     this.buildSvg();
   }
 
@@ -80,18 +94,159 @@ export class BoardRenderer {
 
   renderWith(opts: BoardRenderOptions): void {
     const { state, orientation = 'w' } = opts;
+    const last = state.superState.lastMove;
+
+    // Compute per-piece animations by diffing the previous board against the
+    // new one. This handles BOTH normal chess moves AND card-induced
+    // movements (Trade, Teleport, Swap, Pawn Storm, Resurrection, Coup, ...)
+    // uniformly.
+    const slides = this.animationsEnabled && this.prevBoard
+      ? diffBoardForSlides(this.prevBoard, state.chess.board)
+      : { slides: [], appearances: [], disappearances: [] };
+
+    this.suppressedSquares.clear();
+    for (const s of slides.slides) this.suppressedSquares.add(s.to);
+    for (const a of slides.appearances) this.suppressedSquares.add(a.sq);
+
     this.drawBoard(state.chess, {
       orientation,
       frozen: state.superState.frozenSquares,
       shielded: state.superState.shieldedSquares,
       foul: state.superState.foulSquares,
-      lastFrom: state.superState.lastMove?.from ?? null,
-      lastTo: state.superState.lastMove?.to ?? null,
+      lastFrom: last?.from ?? null,
+      lastTo: last?.to ?? null,
       selected: opts.selectedSquare ?? null,
       legal: new Set(opts.legalDestinations ?? []),
       cardTargets: new Set(opts.cardTargetSquares ?? []),
       checkSq: opts.checkSquare ?? null,
     });
+
+    for (const s of slides.slides) {
+      this.animateSlide(s.from, s.to, s.piece, orientation);
+    }
+    for (const a of slides.appearances) {
+      this.animateAppear(a.sq, a.piece, orientation);
+    }
+    for (const d of slides.disappearances) {
+      this.animateVanish(d.sq, d.piece, orientation);
+    }
+
+    this.prevBoard = [...state.chess.board];
+  }
+
+  /**
+   * Slide a piece from its `from` square to its `to` square as a temporary
+   * overlay. We rely on the next `renderWith()` call to wipe the SVG (since
+   * `drawBoard` already does `removeChild`-in-a-loop at the top) — that means
+   * we don't need to remove the overlay manually. The overlay just sits at
+   * its final position until the next render lands.
+   *
+   * To avoid showing the piece twice (overlay AND static glyph on the
+   * destination), drawBoard skips the destination square on the first frame
+   * after a new move (driven by suppressedSquares).
+   */
+  private animateSlide(from: Square, to: Square, piece: string, orientation: PieceColor): void {
+    const fromCoords = this.squareXY(from, orientation);
+    const toCoords = this.squareXY(to, orientation);
+    const dx = toCoords.x - fromCoords.x;
+    const dy = toCoords.y - fromCoords.y;
+
+    const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    text.setAttribute('x', String(fromCoords.x + this.sqSize / 2));
+    text.setAttribute('y', String(fromCoords.y + this.sqSize / 2 + 14));
+    text.setAttribute('text-anchor', 'middle');
+    text.setAttribute('font-size', '44');
+    text.setAttribute('pointer-events', 'none');
+    text.setAttribute('style', 'filter: drop-shadow(0 4px 3px rgba(0,0,0,0.55));');
+    text.textContent = UNICODE_PIECES[piece] ?? piece;
+    text.style.transition = 'transform 320ms cubic-bezier(.25,.85,.3,1)';
+    text.style.transform = 'translate(0px, 0px)';
+    this.svg.appendChild(text);
+
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        text.style.transform = `translate(${dx}px, ${dy}px)`;
+      });
+    });
+  }
+
+  /** Piece appears out of thin air (Resurrection, Pawn Storm into a fresh
+   * square, etc.). Briefly scale up with a golden glow so it draws the eye. */
+  private animateAppear(sq: Square, piece: string, orientation: PieceColor): void {
+    const { x, y } = this.squareXY(sq, orientation);
+
+    // Pulsing glow ring underneath.
+    const ring = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    const inset = 3;
+    ring.setAttribute('x', String(x + inset));
+    ring.setAttribute('y', String(y + inset));
+    ring.setAttribute('width', String(this.sqSize - inset * 2));
+    ring.setAttribute('height', String(this.sqSize - inset * 2));
+    ring.setAttribute('rx', '6');
+    ring.setAttribute('fill', 'none');
+    ring.setAttribute('stroke', THEME.accent);
+    ring.setAttribute('stroke-width', '3');
+    ring.setAttribute('pointer-events', 'none');
+    ring.style.opacity = '0';
+    ring.style.transition = 'opacity 360ms ease-out';
+    this.svg.appendChild(ring);
+
+    // Piece glyph itself, scaling up.
+    const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    text.setAttribute('x', String(x + this.sqSize / 2));
+    text.setAttribute('y', String(y + this.sqSize / 2 + 14));
+    text.setAttribute('text-anchor', 'middle');
+    text.setAttribute('font-size', '44');
+    text.setAttribute('pointer-events', 'none');
+    text.setAttribute('style', 'filter: drop-shadow(0 2px 1px rgba(0,0,0,0.45));');
+    text.textContent = UNICODE_PIECES[piece] ?? piece;
+    text.style.transformOrigin = `${x + this.sqSize / 2}px ${y + this.sqSize / 2}px`;
+    text.style.transform = 'scale(0.4)';
+    text.style.opacity = '0';
+    text.style.transition = 'transform 360ms cubic-bezier(.34,1.56,.64,1), opacity 240ms ease-out';
+    this.svg.appendChild(text);
+
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        text.style.transform = 'scale(1)';
+        text.style.opacity = '1';
+        ring.style.opacity = '0.9';
+        // fade ring out after the pulse
+        setTimeout(() => { ring.style.opacity = '0'; }, 280);
+      });
+    });
+  }
+
+  /** Piece vanishes (Coup removal, captured piece during a normal move). */
+  private animateVanish(sq: Square, piece: string, orientation: PieceColor): void {
+    const { x, y } = this.squareXY(sq, orientation);
+    const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    text.setAttribute('x', String(x + this.sqSize / 2));
+    text.setAttribute('y', String(y + this.sqSize / 2 + 14));
+    text.setAttribute('text-anchor', 'middle');
+    text.setAttribute('font-size', '44');
+    text.setAttribute('pointer-events', 'none');
+    text.setAttribute('style', 'filter: drop-shadow(0 2px 1px rgba(0,0,0,0.45));');
+    text.textContent = UNICODE_PIECES[piece] ?? piece;
+    text.style.transformOrigin = `${x + this.sqSize / 2}px ${y + this.sqSize / 2}px`;
+    text.style.opacity = '1';
+    text.style.transform = 'scale(1)';
+    text.style.transition = 'transform 240ms ease-in, opacity 240ms ease-in';
+    this.svg.appendChild(text);
+
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        text.style.transform = 'scale(0.3)';
+        text.style.opacity = '0';
+      });
+    });
+  }
+
+  private squareXY(sq: Square, orientation: PieceColor): { x: number; y: number } {
+    const [row, col] = squareToRC(sq);
+    const drawRow = orientation === 'w' ? row : 7 - row;
+    const drawCol = orientation === 'w' ? col : 7 - col;
+    return { x: drawCol * this.sqSize, y: drawRow * this.sqSize };
   }
 
   private drawBoard(
@@ -156,9 +311,9 @@ export class BoardRenderer {
         this.addCornerGlyph(x, y, '⛔');
       }
 
-      // Piece
+      // Piece (suppressed while a slide animation is delivering one here).
       const piece = chess.board[sq];
-      if (piece) {
+      if (piece && !this.suppressedSquares.has(sq)) {
         const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
         text.setAttribute('x', String(x + this.sqSize / 2));
         text.setAttribute('y', String(y + this.sqSize / 2 + 14));
@@ -277,4 +432,78 @@ export function destinationsFor(moves: Move[], from: Square): Square[] {
   const dests: Square[] = [];
   for (const m of moves) if (m.from === from) dests.push(m.to);
   return dests;
+}
+
+interface BoardDiff {
+  /** Pieces that moved from one square to another (paired by nearest match). */
+  slides: Array<{ from: Square; to: Square; piece: string }>;
+  /** Pieces that appeared (no matching disappearance). */
+  appearances: Array<{ sq: Square; piece: string }>;
+  /** Pieces that disappeared (no matching appearance). */
+  disappearances: Array<{ sq: Square; piece: string }>;
+}
+
+/**
+ * Diff two boards and return a list of slide/appear/vanish events for
+ * animation. Slides are formed by pairing each "appeared" piece with the
+ * NEAREST "disappeared" piece of the same color+type — works correctly for:
+ *  - normal moves (1 disappear + 1 appear)
+ *  - captures (capturing piece slides, captured piece vanishes)
+ *  - Pawn Storm (8 same-color pawns, each pairs with its nearest source)
+ *  - Teleport, Swap, Retreat (single piece moves)
+ *  - Trade (a wP and a bP swap; pairs by color+type)
+ *  - Promotion (pawn disappears, queen appears — left as appear+vanish
+ *    since types differ; visually a pawn pops out and a queen pops in)
+ *  - Resurrection (piece appears with no source)
+ *  - Coup (piece disappears with no destination)
+ */
+function diffBoardForSlides(
+  prev: (string | null)[],
+  next: (string | null)[],
+): BoardDiff {
+  const appeared: Array<{ sq: Square; piece: string }> = [];
+  const disappeared: Array<{ sq: Square; piece: string }> = [];
+
+  for (let i = 0; i < 64; i++) {
+    const p0 = prev[i];
+    const p1 = next[i];
+    if (p0 === p1) continue;
+    if (p0 !== null) disappeared.push({ sq: i as Square, piece: p0 });
+    if (p1 !== null) appeared.push({ sq: i as Square, piece: p1 });
+  }
+
+  const slides: Array<{ from: Square; to: Square; piece: string }> = [];
+  const usedDisappeared = new Set<number>();
+
+  // Pair each appearance with its nearest same-piece disappearance.
+  for (const a of appeared) {
+    let bestIdx = -1;
+    let bestDist = Infinity;
+    for (let i = 0; i < disappeared.length; i++) {
+      if (usedDisappeared.has(i)) continue;
+      if (disappeared[i].piece !== a.piece) continue;
+      const dist = chebyshev(disappeared[i].sq, a.sq);
+      if (dist < bestDist) {
+        bestDist = dist;
+        bestIdx = i;
+      }
+    }
+    if (bestIdx >= 0) {
+      usedDisappeared.add(bestIdx);
+      slides.push({ from: disappeared[bestIdx].sq, to: a.sq, piece: a.piece });
+    }
+  }
+
+  const finalAppearances = appeared.filter(
+    (a) => !slides.some((s) => s.to === a.sq),
+  );
+  const finalDisappearances = disappeared.filter((_, i) => !usedDisappeared.has(i));
+
+  return { slides, appearances: finalAppearances, disappearances: finalDisappearances };
+}
+
+function chebyshev(a: Square, b: Square): number {
+  const ar = a >> 3, ac = a & 7;
+  const br = b >> 3, bc = b & 7;
+  return Math.max(Math.abs(ar - br), Math.abs(ac - bc));
 }

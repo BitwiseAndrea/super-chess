@@ -13,7 +13,7 @@ import { MinimaxAI } from '../../ai/minimaxAI.ts';
 import { HeuristicCardAI } from '../../ai/heuristicCardAI.ts';
 import { showNewGamePanel, type NewGameConfig } from './newGamePanel.ts';
 import { setOpenOpponentHandPref } from './prefs.ts';
-import { THEME } from '../theme.ts';
+import { THEME, onThemeChange } from '../theme.ts';
 
 export function renderPlayMode(root: HTMLElement): void {
   root.innerHTML = '';
@@ -114,6 +114,14 @@ function mountGame(root: HTMLElement, cfg: NewGameConfig): void {
   // We don't currently dispose this when navigating away — main.ts wipes
   // the container, the listeners on stale controllers just become no-ops.
 
+  // When the user toggles the theme, baked-in inline styles use CSS variables
+  // and update automatically — but the board SVG, hand cards, log rows and
+  // header dot are re-rendered each emit using JS-interpolated THEME values.
+  // We force a fresh render here so they pick up the new palette immediately.
+  onThemeChange(() => {
+    controller.requestRender();
+  });
+
   controller.start();
 }
 
@@ -121,6 +129,7 @@ interface Layout {
   header: HTMLElement;
   turnIndicator: HTMLElement;
   botLabel: HTMLElement;
+  slowGameChip: HTMLElement;
   newGameBtn: HTMLElement;
   handToggleBtn: HTMLButtonElement;
   board: HTMLElement;
@@ -142,7 +151,7 @@ function buildLayout(root: HTMLElement, cfg: NewGameConfig): Layout {
     padding: 18px 20px 32px;
     display: flex; flex-direction: column;
     gap: 18px;
-    color: ${THEME.textPrimary};
+    color: var(--sc-text);
   `;
   root.appendChild(wrap);
 
@@ -158,8 +167,8 @@ function buildLayout(root: HTMLElement, cfg: NewGameConfig): Layout {
   turnIndicator.style.cssText = `
     display: flex; align-items: center; gap: 10px;
     padding: 8px 14px;
-    background: ${THEME.panel};
-    border: 1px solid ${THEME.border};
+    background: var(--sc-panel);
+    border: 1px solid var(--sc-border);
     border-radius: 999px;
     font-size: 13px;
     letter-spacing: 0.04em;
@@ -169,10 +178,26 @@ function buildLayout(root: HTMLElement, cfg: NewGameConfig): Layout {
   const botLabel = document.createElement('div');
   botLabel.style.cssText = `
     font-size: 11px; letter-spacing: 0.24em; text-transform: uppercase;
-    color: ${THEME.textMuted};
+    color: var(--sc-text-muted);
   `;
-  botLabel.textContent = `bot · ${cfg.botLabel}`;
+  botLabel.textContent = `bot \u00b7 ${cfg.botLabel}`;
   header.appendChild(botLabel);
+
+  const slowGameChip = document.createElement('div');
+  slowGameChip.style.cssText = `
+    padding: 4px 10px;
+    background: var(--sc-panel);
+    border: 1px solid var(--sc-border);
+    border-radius: 999px;
+    font-size: 10.5px; letter-spacing: 0.14em;
+    color: var(--sc-text-muted);
+    font-family: ui-monospace, 'JetBrains Mono', Menlo, monospace;
+    cursor: help;
+  `;
+  slowGameChip.title =
+    'Slow-game rule: after every 6 plies without a capture, whoever just '
+    + 'moved gets a free card. Captures reset the counter.';
+  header.appendChild(slowGameChip);
 
   const spacer = document.createElement('div');
   spacer.style.flex = '1';
@@ -221,7 +246,7 @@ function buildLayout(root: HTMLElement, cfg: NewGameConfig): Layout {
   oppLabel.style.cssText = `
     font-size: 13px;
     letter-spacing: 0.12em;
-    color: ${THEME.textSecondary};
+    color: var(--sc-text-secondary);
   `;
   const oppCaptured = document.createElement('div');
   oppStrip.appendChild(oppLabel);
@@ -243,7 +268,7 @@ function buildLayout(root: HTMLElement, cfg: NewGameConfig): Layout {
   youLabel.style.cssText = `
     font-size: 13px;
     letter-spacing: 0.12em;
-    color: ${THEME.textSecondary};
+    color: var(--sc-text-secondary);
   `;
   const youCaptured = document.createElement('div');
   youStrip.appendChild(youLabel);
@@ -262,7 +287,7 @@ function buildLayout(root: HTMLElement, cfg: NewGameConfig): Layout {
     transition: opacity 220ms ease;
     padding: 0 14px;
     font-size: 13px;
-    color: ${THEME.accent};
+    color: var(--sc-accent);
     text-align: center;
     font-family: system-ui, sans-serif;
   `;
@@ -272,8 +297,8 @@ function buildLayout(root: HTMLElement, cfg: NewGameConfig): Layout {
   const sidePanel = document.createElement('aside');
   sidePanel.style.cssText = `
     display: flex; flex-direction: column;
-    background: ${THEME.panel};
-    border: 1px solid ${THEME.border};
+    background: var(--sc-panel);
+    border: 1px solid var(--sc-border);
     border-radius: 12px;
     height: 600px;
     overflow: hidden;
@@ -283,9 +308,9 @@ function buildLayout(root: HTMLElement, cfg: NewGameConfig): Layout {
   const logHeader = document.createElement('div');
   logHeader.style.cssText = `
     padding: 12px 16px;
-    border-bottom: 1px solid ${THEME.border};
+    border-bottom: 1px solid var(--sc-border);
     font-size: 10.5px; letter-spacing: 0.28em; text-transform: uppercase;
-    color: ${THEME.textMuted};
+    color: var(--sc-text-muted);
   `;
   logHeader.textContent = 'move log';
   sidePanel.appendChild(logHeader);
@@ -304,14 +329,14 @@ function buildLayout(root: HTMLElement, cfg: NewGameConfig): Layout {
   const tip = document.createElement('div');
   tip.style.cssText = `
     padding: 12px 16px;
-    border-top: 1px solid ${THEME.border};
-    font-size: 11.5px;
+    border-top: 1px solid var(--sc-border);
+    font-size: 12px;
     line-height: 1.55;
-    color: ${THEME.textMuted};
+    color: var(--sc-text-secondary);
     font-family: system-ui, sans-serif;
   `;
   tip.innerHTML = `
-    <strong style="color:${THEME.textSecondary};font-weight:500;">tip \u00b7</strong>
+    <strong style="color:var(--sc-text);font-weight:600;">tip \u00b7</strong>
     Click a piece to see legal moves. Click a card to play it (then click its
     target on the board). Click a card again to cancel. Use the
     <em>hand</em> button up top to peek at the bot\u2019s cards.
@@ -323,7 +348,7 @@ function buildLayout(root: HTMLElement, cfg: NewGameConfig): Layout {
   youLabel.textContent = cfg.humanColor === 'w' ? '♔  white (you)' : '♚  black (you)';
 
   return {
-    header, turnIndicator, botLabel, newGameBtn, handToggleBtn,
+    header, turnIndicator, botLabel, slowGameChip, newGameBtn, handToggleBtn,
     board, oppCaptured, youCaptured, oppLabel, youLabel,
     oppHand, youHand, log, banner,
   };
@@ -337,6 +362,20 @@ function updateHandToggle(btn: HTMLButtonElement, revealed: boolean): void {
 }
 
 function updateHeader(layout: Layout, vm: PlayViewModel, cfg: NewGameConfig): void {
+  // slow-game card-draw countdown
+  const plies = vm.slowGame.pliesSinceCapture;
+  const threshold = vm.slowGame.threshold;
+  const untilNext = threshold - (plies % threshold);
+  if (plies === 0) {
+    layout.slowGameChip.textContent = `\u{1F0CF} next slow draw: ${threshold} plies`;
+    layout.slowGameChip.style.color = THEME.textMuted;
+  } else {
+    layout.slowGameChip.textContent = `\u{1F0CF} ${untilNext} ${untilNext === 1 ? 'ply' : 'plies'} \u2192 slow draw`;
+    // amber as we get close, red the ply BEFORE a draw fires
+    layout.slowGameChip.style.color =
+      untilNext === 1 ? THEME.accent : untilNext <= 2 ? THEME.accent : THEME.textMuted;
+  }
+
   layout.turnIndicator.innerHTML = '';
   const dot = document.createElement('span');
   dot.style.cssText = `

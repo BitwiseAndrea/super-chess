@@ -393,6 +393,17 @@ export const CARD_EFFECTS: Record<string, CardEffectFn> = {
     if (state.chess.board[dest] !== null) {
       return { newState: state, logEntry: 'Retreat: destination occupied', materialDelta: 0 };
     }
+    if (!isValidRetreat(p, sq, dest, color, state.chess.board)) {
+      return { newState: state, logEntry: 'Retreat: must move backward up to 2 squares along normal axes', materialDelta: 0 };
+    }
+    // Cannot leave own king in check.
+    const testBoard = [...state.chess.board];
+    testBoard[dest] = p;
+    testBoard[sq] = null;
+    const kingSq = findKing(testBoard as typeof state.chess.board, color);
+    if (isSquareAttackedBy(testBoard as typeof state.chess.board, kingSq, color === 'w' ? 'b' : 'w')) {
+      return { newState: state, logEntry: 'Retreat: would leave king in check', materialDelta: 0 };
+    }
     const next = cloneSuperState(state);
     next.chess.board[dest] = p;
     next.chess.board[sq] = null;
@@ -572,4 +583,76 @@ export const CARD_EFFECTS: Record<string, CardEffectFn> = {
 
 function sqStr(sq: Square): string {
   return String.fromCharCode(97 + (sq & 7)) + String(8 - (sq >> 3));
+}
+
+/**
+ * Retreat-card legality: backward (toward own home rank), up to 2 squares,
+ * along the piece's normal movement axes, path clear for sliders.
+ *
+ * "Backward" means destination row is strictly closer to home rank than source.
+ * - White's home rank is row 7 (rank 1) → backward = dRow > 0.
+ * - Black's home rank is row 0 (rank 8) → backward = dRow < 0.
+ *
+ * Each piece type's axes are honored:
+ * - Pawn: same file only (no diagonals).
+ * - Knight: L-shape (1,2)/(2,1), no path check.
+ * - Bishop: diagonal only.
+ * - Rook: straight along the file only (sideways isn't "backward").
+ * - Queen: file or diagonal backward.
+ * - King: 1 square only, file or diagonal backward.
+ */
+export function isValidRetreat(
+  piece: PieceStr,
+  fromSq: Square,
+  toSq: Square,
+  color: PieceColor,
+  board: SuperChessState['chess']['board'],
+): boolean {
+  const [srcR, srcC] = squareToRC(fromSq);
+  const [destR, destC] = squareToRC(toSq);
+  const dRow = destR - srcR;
+  const dCol = destC - srcC;
+  if (dRow === 0 && dCol === 0) return false;
+
+  const backwardSign = color === 'w' ? 1 : -1; // row delta toward own home rank
+  if (Math.sign(dRow) !== backwardSign) return false; // not strictly backward
+
+  const absDR = Math.abs(dRow);
+  const absDC = Math.abs(dCol);
+  if (Math.max(absDR, absDC) > 2) return false;
+
+  const type = pieceType(piece);
+
+  if (type === 'N') {
+    return (absDR === 1 && absDC === 2) || (absDR === 2 && absDC === 1);
+  }
+
+  if (type === 'P') {
+    if (absDC !== 0) return false;
+    if (absDR === 2) {
+      const midSq = rcToSquare(srcR + backwardSign, srcC);
+      if (board[midSq] !== null) return false;
+    }
+    return true;
+  }
+
+  const isStraight = absDR > 0 && absDC === 0;
+  const isDiagonal = absDR === absDC && absDR > 0;
+  if (type === 'R' && !isStraight) return false;
+  if (type === 'B' && !isDiagonal) return false;
+  if (type === 'Q' && !isStraight && !isDiagonal) return false;
+  if (type === 'K') {
+    if (Math.max(absDR, absDC) > 1) return false;
+    if (!isStraight && !isDiagonal) return false;
+  }
+
+  // Path-clear check for 2-square slides.
+  if (Math.max(absDR, absDC) === 2 && (type === 'R' || type === 'B' || type === 'Q')) {
+    const stepR = Math.sign(dRow);
+    const stepC = Math.sign(dCol);
+    const midSq = rcToSquare(srcR + stepR, srcC + stepC);
+    if (board[midSq] !== null) return false;
+  }
+
+  return true;
 }

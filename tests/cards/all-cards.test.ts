@@ -372,11 +372,17 @@ describe('Double Step', () => {
 });
 
 describe('Retreat', () => {
-  it('moves a piece to an empty square', () => {
+  it('moves a queen 2 squares straight backward', () => {
     const state = makeState('8/8/8/8/4Q3/8/8/4K2k w - - 0 1');
     const { newState } = CARD_EFFECTS.Retreat(state, 'w', { ownPieceSquare: sq('e4'), square: sq('e2') });
     expect(newState.chess.board[sq('e4')]).toBeNull();
     expect(newState.chess.board[sq('e2')]).toBe('wQ');
+  });
+
+  it('moves a queen 2 squares diagonally backward', () => {
+    const state = makeState('8/8/8/8/4Q3/8/8/4K2k w - - 0 1');
+    const { newState } = CARD_EFFECTS.Retreat(state, 'w', { ownPieceSquare: sq('e4'), square: sq('c2') });
+    expect(newState.chess.board[sq('c2')]).toBe('wQ');
   });
 
   it('refuses to move to an occupied square', () => {
@@ -386,21 +392,81 @@ describe('Retreat', () => {
     expect(logEntry).toMatch(/occupied/i);
   });
 
-  // The rules-text limits retreat to "backward up to 2 squares along normal
-  // movement axes". The current effect does not enforce this — any empty
-  // square is allowed. These tests document the gap.
-  it.skip('[KNOWN GAP] should refuse to move pieces forward', () => {
+  it('refuses to move a piece forward (toward the opponent)', () => {
     const state = makeState('8/8/8/4Q3/8/8/8/4K2k w - - 0 1');
-    const { newState } = CARD_EFFECTS.Retreat(state, 'w', { ownPieceSquare: sq('e5'), square: sq('e7') });
-    // For white, "forward" is toward rank 8 — should not be allowed.
+    const { newState, logEntry } = CARD_EFFECTS.Retreat(state, 'w', { ownPieceSquare: sq('e5'), square: sq('e7') });
     expect(newState).toBe(state);
+    expect(logEntry).toMatch(/backward/i);
   });
 
-  it.skip('[KNOWN GAP] should refuse to move more than 2 squares', () => {
-    const state = makeState('8/8/8/8/4Q3/8/8/4K2k w - - 0 1');
-    const { newState } = CARD_EFFECTS.Retreat(state, 'w', { ownPieceSquare: sq('e4'), square: sq('e1') });
-    // 3 squares back — should be rejected.
+  it('refuses to move more than 2 squares backward', () => {
+    // King out of the way on h1; queen on e5 tries to retreat all the way to e1.
+    const state = makeState('8/8/8/4Q3/8/8/8/7K w - - 0 1');
+    const { newState, logEntry } = CARD_EFFECTS.Retreat(state, 'w', { ownPieceSquare: sq('e5'), square: sq('e1') });
     expect(newState).toBe(state);
+    expect(logEntry).toMatch(/backward/i);
+  });
+
+  it('refuses to move a rook sideways (sideways is not backward)', () => {
+    const state = makeState('8/8/8/8/4R3/8/8/4K2k w - - 0 1');
+    const { newState, logEntry } = CARD_EFFECTS.Retreat(state, 'w', { ownPieceSquare: sq('e4'), square: sq('g4') });
+    expect(newState).toBe(state);
+    expect(logEntry).toMatch(/backward/i);
+  });
+
+  it('refuses to move a bishop along the file (not its movement axis)', () => {
+    const state = makeState('8/8/8/8/4B3/8/8/4K2k w - - 0 1');
+    const { newState, logEntry } = CARD_EFFECTS.Retreat(state, 'w', { ownPieceSquare: sq('e4'), square: sq('e2') });
+    expect(newState).toBe(state);
+    expect(logEntry).toMatch(/backward|axes/i);
+  });
+
+  it('allows a knight to retreat in an L (toward home)', () => {
+    const state = makeState('8/8/8/4N3/8/8/8/4K2k w - - 0 1');
+    const { newState } = CARD_EFFECTS.Retreat(state, 'w', { ownPieceSquare: sq('e5'), square: sq('d7') });
+    // d7 is FORWARD for white (toward rank 8). Should be rejected.
+    expect(newState).toBe(state);
+    const { newState: ok } = CARD_EFFECTS.Retreat(state, 'w', { ownPieceSquare: sq('e5'), square: sq('d3') });
+    expect(ok.chess.board[sq('d3')]).toBe('wN');
+  });
+
+  it('allows a pawn to retreat 1 square along its file', () => {
+    const state = makeState('8/8/8/8/4P3/8/8/4K2k w - - 0 1');
+    const { newState } = CARD_EFFECTS.Retreat(state, 'w', { ownPieceSquare: sq('e4'), square: sq('e3') });
+    expect(newState.chess.board[sq('e3')]).toBe('wP');
+  });
+
+  it('allows a pawn to retreat 2 squares if the path is clear', () => {
+    const state = makeState('8/8/8/8/4P3/8/8/4K2k w - - 0 1');
+    const { newState } = CARD_EFFECTS.Retreat(state, 'w', { ownPieceSquare: sq('e4'), square: sq('e2') });
+    expect(newState.chess.board[sq('e2')]).toBe('wP');
+  });
+
+  it('blocks a 2-square pawn retreat if the intermediate square is occupied', () => {
+    // Place a friendly piece on e3 to block.
+    const state = makeState('8/8/8/8/4P3/4B3/8/4K2k w - - 0 1');
+    const { newState, logEntry } = CARD_EFFECTS.Retreat(state, 'w', { ownPieceSquare: sq('e4'), square: sq('e2') });
+    expect(newState).toBe(state);
+    expect(logEntry).toMatch(/backward|axes/i);
+  });
+
+  it('refuses to leave the king in check', () => {
+    // White bishop on c3 is pinned to the e1 king by the black queen on a5
+    // along the a5-e1 diagonal. Retreating c3 \u2192 b2 (a backward-diagonal
+    // bishop move) leaves the pin and exposes the king.
+    const state = makeState('8/8/8/q7/8/2B5/8/4K3 w - - 0 1');
+    const { newState, logEntry } = CARD_EFFECTS.Retreat(state, 'w', { ownPieceSquare: sq('c3'), square: sq('b2') });
+    expect(newState).toBe(state);
+    expect(logEntry).toMatch(/check/i);
+  });
+
+  it('works symmetrically for black (backward is toward rank 8)', () => {
+    // Black queen on e5 retreating to e7 should succeed for black; e3 should fail.
+    const state = makeState('4k3/8/8/4q3/8/8/8/4K3 b - - 0 1');
+    const { newState: ok } = CARD_EFFECTS.Retreat(state, 'b', { ownPieceSquare: sq('e5'), square: sq('e7') });
+    expect(ok.chess.board[sq('e7')]).toBe('bQ');
+    const { newState: bad } = CARD_EFFECTS.Retreat(state, 'b', { ownPieceSquare: sq('e5'), square: sq('e3') });
+    expect(bad).toBe(state);
   });
 });
 
@@ -570,6 +636,70 @@ describe('consumesTurn flag', () => {
       expect(def.consumesTurn, `${name} should not consume the turn`).toBeFalsy();
     }
   });
+});
+
+describe('integration: card draw attribution after Trade swap (regression for "you drew" confusion)', () => {
+  it('a capture by the bot after Trade gives the draw to the bot, not the human', async () => {
+    // Trade swaps a white pawn into black's territory and vice-versa. If the
+    // bot then captures the swapped white pawn on its same turn (e.g.
+    // Ra8xa7), the capture-reward draw must go to BLACK (the mover), and the
+    // cardDraw history entry must record color='b' so the log line reads
+    // "they drew" — never "you drew".
+    const { SuperChessGame } = await import('../../src/game/superChess.ts');
+    type CardAI = import('../../src/ai/types.ts').CardAI;
+    type ChessAI = import('../../src/ai/types.ts').ChessAI;
+
+    // Bot AI: black always plays Trade if available.
+    const tradeAI: CardAI = {
+      name: 'trader',
+      async decide(_s, color, hand) {
+        if (color !== 'b') return { shouldPlay: false };
+        const card = hand.find((h) => h.definition.name === 'Trade');
+        return card ? { shouldPlay: true, card, target: {} } : { shouldPlay: false };
+      },
+    };
+    const passAI: CardAI = { name: 'pass', async decide() { return { shouldPlay: false }; } };
+    // Both chess AIs play the first legal move.
+    const firstLegalAI: ChessAI = {
+      name: 'first-legal',
+      async selectMove(state, color) {
+        const { getSuperChessLegalMoves } = await import('../../src/game/rules.ts');
+        return getSuperChessLegalMoves(state, color)[0];
+      },
+    };
+
+    const game = new SuperChessGame({
+      games: 1,
+      maxMovesPerGame: 60,
+      chessAI: { white: firstLegalAI, black: firstLegalAI },
+      cardAI: { white: passAI, black: tradeAI },
+      searchDepth: 1,
+      speedMs: 0,
+      seed: 42,
+      cardConfig: [{ name: 'Trade', copies: 60 }],
+    } as never);
+
+    await game.runToCompletion();
+
+    // Assert that the cardDraw entries' `color` field correctly identifies
+    // the mover. Specifically: every capture-reward draw must be attributed
+    // to the color whose move immediately preceded it.
+    const state = game.getState();
+    type CardDrawEv = { color: string; reason: string };
+    type MoveEv = { color: string; capture: unknown; algebraic: string };
+
+    let lastMoveColor: string | null = null;
+    for (const e of state.history) {
+      if (e.type === 'move') {
+        lastMoveColor = (e.data as MoveEv).color;
+      } else if (e.type === 'cardDraw') {
+        const d = e.data as CardDrawEv;
+        if (d.reason === 'capture') {
+          expect(d.color, `capture-reward draw on turn ${e.turn} should match the color of the preceding move`).toBe(lastMoveColor);
+        }
+      }
+    }
+  }, 30000);
 });
 
 describe('integration: SuperChessGame respects consumesTurn (the user-reported bug)', () => {

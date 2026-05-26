@@ -183,10 +183,12 @@ ReplicatedStorage/
 
 ServerScriptService/
   SuperChessServer/
-    WorldBuilder   Script        spawns 64-square board, hand panels, status board, lights
-    GameManager    Script        authoritative game loop
-    VisualSync     ModuleScript  syncs Workspace.SuperChess.Pieces + hand SurfaceGuis +
-                                 StatusBoard text/log to a snapshot
+    WorldBuilder       Script        spawns 64-square board, hand panels, status board,
+                                     lights, and the noob-bot avatar
+    GameManager        Script        authoritative game loop
+    VisualSync         ModuleScript  syncs Workspace.SuperChess.Pieces + hand SurfaceGuis +
+                                     StatusBoard text/log to a snapshot
+    NoobBotController  ModuleScript  drives the in-world noob's emotes + chat bubble
 
 StarterPlayer/StarterPlayerScripts/
   SuperChessClient/
@@ -201,6 +203,9 @@ Workspace/SuperChess/
   WhiteHandPanel   Part with SurfaceGui rendering white's hand (2 cards)
   BlackHandPanel   Part with SurfaceGui rendering black's hand (2 cards)
   StatusBoard      Part with SurfaceGui showing turn + recent move log
+  NoobBot          R6 humanoid avatar (classic noob colours) standing behind the
+                   black hand panel; plays animated emotes for thinking / waiting /
+                   celebrating / sad, with a chat bubble above its head
   Base             wood-colored slab under the board
 ```
 
@@ -244,7 +249,9 @@ Workspace/SuperChess/
 | 3D world | n/a | yes | graybox parts: cylinders for round pieces, blocks for square pieces |
 | Card UI | HTML/CSS | SurfaceGui on 3D part | one panel per player on the long side of the board; rarity color band, big icon, name, wrapped description, category footer; new cards tween in with a gold-stroke flash |
 | Open / closed hand | closed in `play`, open in `simulate` | both via in-game toggle | hot-seat closed-hand flips with the turn; bot's hand always hidden when closed |
-| AI (Minimax chess) | yes (TS, depth 2-3) | yes (Luau, depth 1-3 selectable) | alpha-beta with capture-first ordering, ~6ms/move at depth 2 |
+| AI (Minimax chess) | yes (TS, depth 2-3) | yes (Luau, depth 1-3 selectable) | alpha-beta with capture-first ordering, ~6ms/move at depth 2; paced so bot moves take ~1.6 s start-to-finish |
+| Bot "thinking" UX | n/a (TS just runs) | pre-delay 0.6 s + min think 1.0 s + post-settle 0.2 s | StatusBoard cycles "Black is thinking", "..thinking.", "..thinking..", "..thinking..." every 0.3 s; client adds a gold UIStroke pulse around the bot's hand panel |
+| Bot avatar | n/a | R6 classic-noob standing behind the black hand panel | crossfades between four built-in R6 emote animations (idle / wave / cheer / laugh) for waiting / thinking / celebrating / sad, with a BillboardGui chat bubble ("hmm…", "your move", "GG!", "oof") |
 | Heuristic CardAI | yes | no | bot plays only chess moves, not cards |
 | Solo play vs bot | yes | yes | toggle from HUD (default: bot plays black, depth 2) |
 | Simulation runner (CLI) | yes | no | not applicable in-engine |
@@ -276,4 +283,6 @@ Workspace/SuperChess/
 - Verified bot at depth 3: ~60 ms per move from the initial position (still real-time)
 - Verified `SetHandsOpen` flow renders rich card faces on the active side and dark "HIDDEN" backs on the opponent (default vs bot); toggling to OPEN reveals both sides
 - Verified new-card tween fires on each fresh `CardId` via diff against client-side `seenCardIds`
+- Verified the bot pacing flow: pre-delay → "Black is thinking" with cycling dots (0.3 s tick) for ≥ 1.0 s → bot move appears → 0.2 s settle → status flips to "White to move"
+- Verified the noob avatar: `Players:CreateHumanoidModelFromDescription` produces a classic R6 model (68 descendants, humanoid + animator), loads the R6 wave animation (length 1.5 s, `IsPlaying = true`), and `NoobBotController.setMood` crossfades between the four mood tracks and updates the chat bubble
 

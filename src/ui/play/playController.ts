@@ -20,7 +20,7 @@ import { applyMove, toAlgebraic, isInCheck, findKing, pieceColor, pieceType } fr
 import { createSuperState } from '../../game/types.ts';
 import { Deck } from '../../cards/deck.ts';
 import { buildDeck } from '../../cards/definitions.ts';
-import { CARD_EFFECTS } from '../../cards/effects.ts';
+import { CARD_EFFECTS, isValidRetreat } from '../../cards/effects.ts';
 import {
   getSuperChessLegalMoves,
   checkGameOver,
@@ -73,6 +73,9 @@ export interface PlayViewModel {
   botThinking: boolean;
   banner: string | null;
   checkSquare: Square | null;
+  /** How many plies in a row have happened without a capture, plus the
+   * threshold at which the next slow-game free card is dealt. */
+  slowGame: { pliesSinceCapture: number; threshold: number };
 }
 
 export class PlayController {
@@ -386,7 +389,10 @@ export class PlayController {
                 this.deck.play(color, decision.card);
                 this.state.deck = this.deck.getState();
               }
-              this.flashBanner(`opponent played ${decision.card.definition.emoji} ${decision.card.definition.name}`);
+              // Use the effect's own logEntry text so things like Trade can
+              // say "Trade: wP at a2 ↔ bP at a7" instead of just the name.
+              const detail = result.logEntry ? `: ${stripCardPrefix(result.logEntry, decision.card.definition.name)}` : '';
+              this.flashBanner(`opponent played ${decision.card.definition.emoji} ${decision.card.definition.name}${detail}`);
               this.emit();
               // Bigger pause for cards — they're a "big moment" worth lingering on.
               await microPause(620);
@@ -491,11 +497,7 @@ export class PlayController {
           data: { color, card: drawn, reason: 'capture' },
           turn: this.state.chess.fullMoveNumber,
         });
-        if (color !== this.cfg.humanColor) {
-          this.flashBanner(`opponent drew a card (capture)`);
-        } else {
-          this.flashBanner(`you drew ${drawn.definition.emoji} ${drawn.definition.name}`);
-        }
+        this.announceDraw(color, drawn.definition.emoji, drawn.definition.name, 'capture');
       }
     } else if (
       nextSuper.turnsSinceCapture > 0 &&
@@ -509,9 +511,7 @@ export class PlayController {
             data: { color, card: drawn, reason: 'slowGame' },
             turn: this.state.chess.fullMoveNumber,
           });
-          if (color === this.cfg.humanColor) {
-            this.flashBanner(`slow-game draw: ${drawn.definition.emoji} ${drawn.definition.name}`);
-          }
+          this.announceDraw(color, drawn.definition.emoji, drawn.definition.name, 'slowGame');
         }
       } else {
         const hand = this.deck.getHand(color);
@@ -524,6 +524,7 @@ export class PlayController {
               data: { color, card: drawn, reason: 'slowGame' },
               turn: this.state.chess.fullMoveNumber,
             });
+            this.announceDraw(color, drawn.definition.emoji, drawn.definition.name, 'slowGame');
           }
         }
       }
@@ -531,6 +532,33 @@ export class PlayController {
     this.state.deck = this.deck.getState();
 
     this.recordPosition();
+  }
+
+  /** Friendly banner for any card draw — opponent or you. The "slow-game"
+   * reason is called out explicitly so it doesn't feel like cards are
+   * appearing from nowhere. */
+  private announceDraw(
+    color: PieceColor,
+    emoji: string,
+    name: string,
+    reason: 'capture' | 'slowGame',
+  ): void {
+    const who = color === this.cfg.humanColor ? 'you' : 'opponent';
+    const verb = who === 'you' ? 'drew' : 'drew';
+    if (reason === 'capture') {
+      if (who === 'you') {
+        this.flashBanner(`\u{1F0CF} you drew ${emoji} ${name} (capture reward)`);
+      } else {
+        this.flashBanner(`\u{1F0CF} opponent ${verb} a card (capture reward)`);
+      }
+    } else {
+      // slow-game: be explicit about WHY
+      if (who === 'you') {
+        this.flashBanner(`\u{1F0CF} you drew ${emoji} ${name} (slow game \u2014 ${this.slowGameThreshold} plies w/o capture)`);
+      } else {
+        this.flashBanner(`\u{1F0CF} opponent drew a card (slow game \u2014 ${this.slowGameThreshold} plies w/o capture)`);
+      }
+    }
   }
 
   private detectGameOver(): boolean {
@@ -649,11 +677,19 @@ export class PlayController {
         }
         break;
       case 'teleport':
-      case 'retreat':
         for (let i = 0; i < 64; i++) {
           if (board[i] === null) set.add(i);
         }
         break;
+      case 'retreat': {
+        const p = board[firstSq];
+        if (!p) break;
+        for (let i = 0; i < 64; i++) {
+          if (board[i] !== null) continue;
+          if (isValidRetreat(p, firstSq, i, color, board)) set.add(i);
+        }
+        break;
+      }
       default:
         break;
     }
@@ -716,6 +752,10 @@ export class PlayController {
       botThinking: this.botThinking,
       banner: this.banner,
       checkSquare: checkSq,
+      slowGame: {
+        pliesSinceCapture: this.state.superState.turnsSinceCapture,
+        threshold: this.slowGameThreshold,
+      },
     };
   }
 
@@ -769,6 +809,16 @@ function positionKey(state: SuperChessState): string {
     (cr.wKingside ? 'K' : '') + (cr.wQueenside ? 'Q' : '') +
     (cr.bKingside ? 'k' : '') + (cr.bQueenside ? 'q' : '');
   return chess.board.join('') + chess.turn + castle + (chess.enPassantSquare ?? '-');
+}
+
+/**
+ * The CardEffectResult.logEntry strings start with "<CardName>: ..." for
+ * readability in the move log. For banners we already show the card name in
+ * the prefix, so strip the redundant "<CardName>: " from the detail.
+ */
+function stripCardPrefix(logEntry: string, cardName: string): string {
+  const prefix = `${cardName}: `;
+  return logEntry.startsWith(prefix) ? logEntry.slice(prefix.length) : logEntry;
 }
 
 function microPause(ms: number): Promise<void> {
