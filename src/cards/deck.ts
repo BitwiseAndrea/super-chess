@@ -51,6 +51,34 @@ export class Deck {
     return card;
   }
 
+  /** Pop the top card off the draw pile (reshuffling the discard pile if
+   * the draw pile is empty). Does NOT add it to any hand and DOES NOT
+   * respect maxHandSize — the caller decides what to do with the result.
+   *
+   * Use this for "peek-and-choose" flows where the player gets to look at
+   * the next card and pick which card to discard from a full hand. */
+  forceDraw(): CardInstance | null {
+    if (this.drawPile.length === 0) {
+      if (this.discardPile.length === 0) return null;
+      this.reshuffleDiscard();
+    }
+    return this.drawPile.pop() ?? null;
+  }
+
+  /** Add a card directly into a hand, bypassing maxHandSize. The caller is
+   * responsible for ensuring the hand isn't over-large afterwards (e.g. by
+   * having just discarded another card). Used to complete a peek-and-swap. */
+  addToHand(color: PieceColor, card: CardInstance): void {
+    const hand = color === 'w' ? this.hands.white : this.hands.black;
+    hand.push(card);
+  }
+
+  /** Push a card directly to the discard pile. Used when the player rejects
+   * a peeked card (or when the bot's heuristic decides not to swap). */
+  sendToDiscard(card: CardInstance): void {
+    this.discardPile.push(card);
+  }
+
   discard(color: PieceColor, card: CardInstance): void {
     const hand = color === 'w' ? this.hands.white : this.hands.black;
     const idx = hand.findIndex((c) => c.id === card.id);

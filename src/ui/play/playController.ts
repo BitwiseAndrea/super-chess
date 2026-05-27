@@ -29,7 +29,7 @@ import {
   consumeTurnBookkeeping,
 } from '../../game/rules.ts';
 import { destinationsFor } from '../board.ts';
-import { showPromotionPicker, showPieceTypePicker, showGameOverModal } from './modals.ts';
+import { showPromotionPicker, showPieceTypePicker, showGameOverModal, showHandFullPicker } from './modals.ts';
 import type { DebugLog } from './debugLog.ts';
 import { validateState } from '../../game/debug.ts';
 
@@ -357,7 +357,7 @@ export class PlayController {
   }
 
   private async applyHumanMove(move: Move): Promise<void> {
-    this.commitMove(move);
+    await this.commitMove(move);
     this.selectedSquare = null;
     this.emit();
 
@@ -516,7 +516,7 @@ export class PlayController {
       await microPause(min - elapsed);
     }
 
-    this.commitMove(move);
+    await this.commitMove(move);
     this.botThinking = false;
 
     if (this.detectGameOver()) return;
@@ -525,7 +525,7 @@ export class PlayController {
 
   // ─── shared move commit (mutates this.state) ──────────────────────────────
 
-  private commitMove(move: Move): void {
+  private async commitMove(move: Move): Promise<void> {
     const color = this.state.chess.turn;
     const algebraic = toAlgebraic(this.state.chess, move);
     const annotated = { ...move, algebraic, turnNumber: this.state.chess.fullMoveNumber, color };
@@ -552,54 +552,115 @@ export class PlayController {
       boardAfter: { ...newChess, board: [...newChess.board] },
     });
 
-    // Card draw triggers — same logic as the sim.
+    // Card draw triggers — capture reward (skip white's first), or slow-game.
     const skipThisDraw = color === 'w' && !this.whiteFirstDrawSkipped && captureHappened;
     if (skipThisDraw) {
       this.whiteFirstDrawSkipped = true;
-    } else if (captureHappened && this.deck.handSize(color) < this.deck.maxHandSize) {
-      const drawn = this.deck.draw(color);
-      if (drawn) {
-        this.state.history.push({
-          type: 'cardDraw',
-          data: { color, card: drawn, reason: 'capture' },
-          turn: this.state.chess.fullMoveNumber,
-        });
-        this.announceDraw(color, drawn.definition.emoji, drawn.definition.name, 'capture');
-      }
+    } else if (captureHappened) {
+      await this.drawOrSwap(color, 'capture');
     } else if (
       nextSuper.turnsSinceCapture > 0 &&
       nextSuper.turnsSinceCapture % this.slowGameThreshold === 0
     ) {
-      if (this.deck.handSize(color) < this.deck.maxHandSize) {
-        const drawn = this.deck.draw(color);
-        if (drawn) {
-          this.state.history.push({
-            type: 'cardDraw',
-            data: { color, card: drawn, reason: 'slowGame' },
-            turn: this.state.chess.fullMoveNumber,
-          });
-          this.announceDraw(color, drawn.definition.emoji, drawn.definition.name, 'slowGame');
-        }
-      } else {
-        const hand = this.deck.getHand(color);
-        if (hand.length > 0) {
-          this.deck.discard(color, hand[0]);
-          const drawn = this.deck.draw(color);
-          if (drawn) {
-            this.state.history.push({
-              type: 'cardDraw',
-              data: { color, card: drawn, reason: 'slowGame' },
-              turn: this.state.chess.fullMoveNumber,
-            });
-            this.announceDraw(color, drawn.definition.emoji, drawn.definition.name, 'slowGame');
-          }
-        }
-      }
+      await this.drawOrSwap(color, 'slowGame');
     }
     this.state.deck = this.deck.getState();
 
     this.recordPosition();
     this.runSelfCheck();
+  }
+
+  /**
+   * Try to draw a card for `color`. Three paths:
+   *
+   *   1. Hand has room → draw normally and announce.
+   *   2. Hand is full and `color` is the human → peek the next card and
+   *      open a modal letting them pick which of three cards to discard.
+   *   3. Hand is full and `color` is the bot → run a rarity heuristic:
+   *      swap iff the new card outranks the bot's weakest card.
+   *
+   * Always logs to the history (either cardDraw + cardDiscard for a swap,
+   * or cardDiscard alone for a reject). Banners explain the outcome.
+   */
+  private async drawOrSwap(
+    color: PieceColor,
+    reason: 'capture' | 'slowGame',
+  ): Promise<void> {
+    // Path 1: easy case — hand has room.
+    if (this.deck.handSize(color) < this.deck.maxHandSize) {
+      const drawn = this.deck.draw(color);
+      if (!drawn) return; // deck + discard both empty
+      this.state.history.push({
+        type: 'cardDraw',
+        data: { color, card: drawn, reason },
+        turn: this.state.chess.fullMoveNumber,
+      });
+      this.announceDraw(color, drawn.definition.emoji, drawn.definition.name, reason);
+      return;
+    }
+
+    // Hand is full — peek the next card so we can offer a draft.
+    const peeked = this.deck.forceDraw();
+    if (!peeked) return;
+
+    const existing = [...this.deck.getHand(color)];
+    let toDiscard: CardInstance;
+
+    if (color === this.cfg.humanColor) {
+      // Path 2: human picks via modal.
+      // Re-emit first so the board is settled before the modal pops.
+      this.state.deck = this.deck.getState();
+      this.emit();
+      toDiscard = await showHandFullPicker({ existing, incoming: peeked, reason });
+    } else {
+      // Path 3: bot heuristic — swap iff new card has higher rarity than
+      // weakest in hand. Ties favour KEEPING (skip the new card).
+      const rank = { common: 1, uncommon: 2, rare: 3 } as const;
+      const peekedRank = rank[peeked.definition.rarity];
+      const weakest = existing.reduce(
+        (min, c) => (rank[c.definition.rarity] < rank[min.definition.rarity] ? c : min),
+        existing[0],
+      );
+      const weakestRank = rank[weakest.definition.rarity];
+      toDiscard = peekedRank > weakestRank ? weakest : peeked;
+    }
+
+    // Apply the decision.
+    const kept = toDiscard.id === peeked.id;
+    if (kept) {
+      // Player/bot rejected the new card — it goes straight to discard.
+      this.deck.sendToDiscard(peeked);
+      this.state.history.push({
+        type: 'cardDiscard',
+        data: { color, card: peeked },
+        turn: this.state.chess.fullMoveNumber,
+      });
+      this.announceSkippedDraw(color, peeked.definition.name, reason);
+      this.cfg.debugLog?.info('card', `${color} skipped draw (hand full)`, {
+        reason, peeked: peeked.definition.name,
+      });
+    } else {
+      // Swap: discard the chosen existing card, add the new one.
+      this.deck.discard(color, toDiscard);
+      this.deck.addToHand(color, peeked);
+      this.state.history.push({
+        type: 'cardDiscard',
+        data: { color, card: toDiscard },
+        turn: this.state.chess.fullMoveNumber,
+      });
+      this.state.history.push({
+        type: 'cardDraw',
+        data: { color, card: peeked, reason },
+        turn: this.state.chess.fullMoveNumber,
+      });
+      this.announceSwappedDraw(color, toDiscard, peeked, reason);
+      this.cfg.debugLog?.info('card', `${color} swapped on full-hand draw`, {
+        reason,
+        discarded: toDiscard.definition.name,
+        kept: peeked.definition.name,
+      });
+    }
+    this.state.deck = this.deck.getState();
   }
 
   /** Run lightweight invariant checks after each commit. Any errors are
@@ -645,6 +706,39 @@ export class PlayController {
       } else {
         this.flashBanner(`\u{1F0CF} opponent drew a card (slow game \u2014 ${this.slowGameThreshold} plies w/o capture)`);
       }
+    }
+  }
+
+  /** Banner when a peeked draw is rejected (hand-full draft, user kept their
+   * hand and discarded the new card). */
+  private announceSkippedDraw(
+    color: PieceColor,
+    peekedName: string,
+    reason: 'capture' | 'slowGame',
+  ): void {
+    const tag = reason === 'capture' ? 'capture reward' : 'slow-game draw';
+    if (color === this.cfg.humanColor) {
+      this.flashBanner(`\u{1F0CF} you skipped ${peekedName} \u2014 hand full (${tag})`);
+    } else {
+      this.flashBanner(`\u{1F0CF} opponent kept its hand (${tag})`);
+    }
+  }
+
+  /** Banner when a peeked draw replaces a held card. */
+  private announceSwappedDraw(
+    color: PieceColor,
+    discarded: CardInstance,
+    kept: CardInstance,
+    reason: 'capture' | 'slowGame',
+  ): void {
+    const tag = reason === 'capture' ? 'capture reward' : 'slow-game draw';
+    if (color === this.cfg.humanColor) {
+      this.flashBanner(
+        `\u{1F0CF} you swapped ${discarded.definition.name} \u2192 ${kept.definition.emoji} ${kept.definition.name} (${tag})`,
+      );
+    } else {
+      // Don't reveal which card the bot dropped — that would leak hand info.
+      this.flashBanner(`\u{1F0CF} opponent swapped a card (${tag})`);
     }
   }
 

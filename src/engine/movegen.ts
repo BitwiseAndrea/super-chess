@@ -322,6 +322,7 @@ export function applyMoveInPlace(state: ChessState, move: Move): SavedState {
     previousCastlingRights: cloneCastlingRights(state.castlingRights),
     previousHalfMoveClock: state.halfMoveClock,
     previousFullMoveNumber: state.fullMoveNumber,
+    previousTurn: state.turn,
   };
   applyMoveToBoard(state, move);
   return saved;
@@ -389,12 +390,14 @@ function applyMoveToBoard(state: ChessState, move: Move): void {
 
 export function undoMove(state: ChessState, move: Move, saved: SavedState): void {
   const { board } = state;
-  const movedPiece = move.promotion !== null ? (move.from < 8 || move.from > 55 ? 'bP' : 'wP') : board[move.to]!;
-
-  // Undo promotion: restore pawn
+  // The piece currently on move.to is the piece that just moved (possibly
+  // promoted). Its color tells us which color the original pawn was, even in
+  // weird Trade-induced positions where the pawn lives off its normal rank.
+  const landedPiece = board[move.to]!;
+  const movedColor = pieceColor(landedPiece);
   const originalPiece = move.promotion !== null
-    ? makePiece(pieceColor(movedPiece), 'P')
-    : movedPiece;
+    ? makePiece(movedColor, 'P')
+    : landedPiece;
 
   board[move.from] = originalPiece;
   board[move.to] = saved.capturedPiece;
@@ -416,7 +419,7 @@ export function undoMove(state: ChessState, move: Move, saved: SavedState): void
   state.castlingRights = saved.previousCastlingRights;
   state.halfMoveClock = saved.previousHalfMoveClock;
   state.fullMoveNumber = saved.previousFullMoveNumber;
-  state.turn = pieceColor(originalPiece);
+  state.turn = saved.previousTurn;
 }
 
 // ─── full move generation ───────────────────────────────────────────────────

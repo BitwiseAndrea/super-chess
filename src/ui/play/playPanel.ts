@@ -123,7 +123,7 @@ function mountGame(root: HTMLElement, cfg: NewGameConfig): void {
     oppCaptured.render(vm.state, vm.humanColor === 'w' ? 'b' : 'w');
     youCaptured.render(vm.state, vm.humanColor);
     updateHeader(layout, vm, cfg);
-    updateLog(layout.log, vm);
+    updateLog(layout.log, vm, revealOpponent);
     updateBanner(layout.banner, vm);
   });
 
@@ -480,8 +480,12 @@ function humanCardHint(vm: PlayViewModel): string {
   }
 }
 
-function updateLog(log: HTMLElement, vm: PlayViewModel): void {
-  // Render the last ~40 events so the log can show full game without grow forever.
+function updateLog(log: HTMLElement, vm: PlayViewModel, revealOpponent: boolean): void {
+  // Render the last ~60 events so the log can show full game without growing forever.
+  // When the opponent's hand is closed, we hide the *identity* of their draws
+  // and discards — leaking those would defeat the whole "closed hand" mode.
+  // Plays are still shown by name because the effect is already visible on
+  // the board (and the banner spells it out).
   const events = vm.state.history.slice(-60);
   log.innerHTML = '';
   for (const ev of events) {
@@ -497,14 +501,26 @@ function updateLog(log: HTMLElement, vm: PlayViewModel): void {
       row.style.color = THEME.textMuted;
       row.style.fontSize = '11px';
       const isHuman = ev.data.color === vm.humanColor;
-      const verb = isHuman ? 'you drew' : 'they drew';
-      row.textContent = `   • ${verb} ${ev.data.card.definition.name}`;
+      if (isHuman) {
+        row.textContent = `   • you drew ${ev.data.card.definition.name}`;
+      } else if (revealOpponent) {
+        row.textContent = `   • they drew ${ev.data.card.definition.name}`;
+      } else {
+        // Hand closed → show that a draw happened but not what.
+        row.textContent = `   • they drew a card`;
+      }
     } else if (ev.type === 'cardDiscard') {
       row.style.color = THEME.textMuted;
       row.style.fontSize = '11px';
       row.style.fontStyle = 'italic';
       const isHuman = ev.data.color === vm.humanColor;
-      row.textContent = `   • ${isHuman ? 'you discarded' : 'they discarded'} ${ev.data.card.definition.name}`;
+      if (isHuman) {
+        row.textContent = `   • you discarded ${ev.data.card.definition.name}`;
+      } else if (revealOpponent) {
+        row.textContent = `   • they discarded ${ev.data.card.definition.name}`;
+      } else {
+        row.textContent = `   • they discarded a card`;
+      }
     } else if (ev.type === 'gameOver') {
       row.style.color = THEME.accent;
       row.style.fontWeight = '600';

@@ -62,4 +62,8 @@ export interface SavedState {
   previousCastlingRights: CastlingRights;
   previousHalfMoveClock: number;
   previousFullMoveNumber: number;
+  // Saved explicitly: in normal play this equals the moving piece's color,
+  // but Super Chess card effects (e.g. Trade) can place pieces on ranks
+  // where the moved-piece color cannot be safely inferred from move.from.
+  previousTurn: PieceColor;
 }

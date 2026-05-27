@@ -231,6 +231,21 @@ function validateSuperState(
   if (ss.turnsSinceCapture < 0) {
     push('error', 'superState', `turnsSinceCapture negative: ${ss.turnsSinceCapture}`);
   }
+
+  // capturedByColor[X] should only contain pieces of the OPPOSITE color —
+  // you can't capture your own pieces in legal chess. If X has an X-piece in
+  // their captured list, the engine attributed a move to the wrong side
+  // (a real bug we hit when undoMove failed to restore state.turn after a
+  // Trade-induced black pawn promotion search).
+  for (const color of ['w', 'b'] as const) {
+    const captured = ss.capturedByColor.get(color) ?? [];
+    for (const p of captured) {
+      if (pieceColor(p) === color) {
+        push('error', 'superState',
+          `${color} has ${p} in their captured list — friendly-fire capture impossible`);
+      }
+    }
+  }
 }
 
 function validateHistory(

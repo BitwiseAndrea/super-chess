@@ -64,6 +64,111 @@ describe('Deck', () => {
   });
 });
 
+// Peek-and-choose primitives used by the hand-full "draft" flow.
+//   forceDraw() — pops next card, does NOT add to hand, ignores maxHandSize.
+//   addToHand() — adds a card directly to a hand, no size check.
+//   sendToDiscard() — pushes a card directly to discard pile.
+//
+// The combination supports: peek → ask user → (a) swap, or (b) reject.
+describe('Deck.forceDraw / addToHand / sendToDiscard', () => {
+  it('forceDraw pops a card and does NOT add it to any hand', () => {
+    const deck = new Deck(CARD_DEFINITIONS);
+    deck.shuffle(99);
+    const before = deck.drawPileSize;
+    const card = deck.forceDraw();
+    expect(card).not.toBeNull();
+    expect(deck.drawPileSize).toBe(before - 1);
+    expect(deck.handSize('w')).toBe(0);
+    expect(deck.handSize('b')).toBe(0);
+    expect(deck.discardPileSize).toBe(0);
+  });
+
+  it('forceDraw bypasses maxHandSize (caller is responsible)', () => {
+    const deck = new Deck(CARD_DEFINITIONS);
+    deck.shuffle(7);
+    deck.draw('w');
+    deck.draw('w');
+    expect(deck.handSize('w')).toBe(2);
+    // Even with a full hand, forceDraw still gives us a card.
+    const card = deck.forceDraw();
+    expect(card).not.toBeNull();
+    // Hand size is unchanged — forceDraw doesn't touch hands.
+    expect(deck.handSize('w')).toBe(2);
+  });
+
+  it('forceDraw reshuffles the discard pile when empty', () => {
+    const deck = new Deck(CARD_DEFINITIONS);
+    deck.shuffle(13);
+    // Send a few cards to discard.
+    deck.draw('w');
+    const c = deck.getHand('w')[0];
+    deck.discard('w', c);
+    // Drain the draw pile by repeatedly forceDrawing into discard.
+    while (deck.drawPileSize > 0) {
+      const x = deck.forceDraw();
+      if (x) deck.sendToDiscard(x);
+    }
+    expect(deck.drawPileSize).toBe(0);
+    expect(deck.discardPileSize).toBeGreaterThan(0);
+    // Next forceDraw should trigger a reshuffle from discard.
+    const after = deck.forceDraw();
+    expect(after).not.toBeNull();
+  });
+
+  it('addToHand puts a card directly into the named hand', () => {
+    const deck = new Deck(CARD_DEFINITIONS);
+    deck.shuffle(1);
+    const peeked = deck.forceDraw()!;
+    deck.addToHand('b', peeked);
+    expect(deck.handSize('b')).toBe(1);
+    expect(deck.getHand('b')[0].id).toBe(peeked.id);
+  });
+
+  it('sendToDiscard pushes to the discard pile without touching hands', () => {
+    const deck = new Deck(CARD_DEFINITIONS);
+    deck.shuffle(2);
+    const peeked = deck.forceDraw()!;
+    deck.sendToDiscard(peeked);
+    expect(deck.discardPileSize).toBe(1);
+    expect(deck.handSize('w')).toBe(0);
+  });
+
+  it('full swap flow: peek → discard from hand → add peek (net hand size stable)', () => {
+    const deck = new Deck(CARD_DEFINITIONS);
+    deck.shuffle(123);
+    deck.draw('w');
+    deck.draw('w');
+    expect(deck.handSize('w')).toBe(2);
+
+    const peeked = deck.forceDraw()!;
+    const existing = [...deck.getHand('w')];
+    const toDiscard = existing[0];
+    deck.discard('w', toDiscard);
+    deck.addToHand('w', peeked);
+
+    expect(deck.handSize('w')).toBe(2);
+    expect(deck.getHand('w').map((c) => c.id)).toContain(peeked.id);
+    expect(deck.getHand('w').map((c) => c.id)).not.toContain(toDiscard.id);
+    // Discarded card is in the discard pile.
+    expect(deck.getState().discardPile.map((c) => c.id)).toContain(toDiscard.id);
+  });
+
+  it('reject flow: peek then sendToDiscard leaves hand untouched', () => {
+    const deck = new Deck(CARD_DEFINITIONS);
+    deck.shuffle(321);
+    deck.draw('w');
+    deck.draw('w');
+    const handBefore = deck.getHand('w').map((c) => c.id);
+
+    const peeked = deck.forceDraw()!;
+    deck.sendToDiscard(peeked);
+
+    expect(deck.handSize('w')).toBe(2);
+    expect(deck.getHand('w').map((c) => c.id)).toEqual(handBefore);
+    expect(deck.getState().discardPile.map((c) => c.id)).toContain(peeked.id);
+  });
+});
+
 describe('CARD_DEFINITIONS', () => {
   it('has at least 19 cards', () => {
     expect(CARD_DEFINITIONS.length).toBeGreaterThanOrEqual(19);
