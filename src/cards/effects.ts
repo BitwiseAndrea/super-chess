@@ -226,26 +226,32 @@ export const CARD_EFFECTS: Record<string, CardEffectFn> = {
     const promRow = color === 'w' ? 0 : 7;
     const pawnStr = makePiece(color, 'P');
 
+    // ⚠️ Architecture note: we MUST snapshot all pawn source squares up-front
+    // and treat them as a fixed set, because the destination of one pawn can
+    // overlap with the source we're about to visit. Iterating `board` 0→63
+    // while also writing the moved pawn ahead of the cursor caused every
+    // black pawn (dir=+8) to be re-read at its new square and advanced again,
+    // cascading the whole rank from 7 down to 3.
+    //
+    // The fix is to read positions once from a snapshot, then mutate `board`.
+    const sourceSquares: number[] = [];
     for (let sq = 0; sq < 64; sq++) {
-      if (board[sq] !== pawnStr) continue;
+      if (board[sq] === pawnStr) sourceSquares.push(sq);
+    }
+
+    for (const sq of sourceSquares) {
       const target = sq + dir;
       if (target < 0 || target >= 64) continue;
       if (board[target] !== null) continue;
-      // Check if move leaves king in check
+      // Reject pseudo-legal moves that leave own king in check.
       const testBoard = [...board];
       const [targetRow] = squareToRC(target);
-      if (targetRow === promRow) {
-        testBoard[sq] = null;
-        testBoard[target] = makePiece(color, 'Q');
-      } else {
-        testBoard[sq] = null;
-        testBoard[target] = pawnStr;
-      }
+      testBoard[sq] = null;
+      testBoard[target] = targetRow === promRow ? makePiece(color, 'Q') : pawnStr;
       const kingSq = findKing(testBoard as typeof board, color);
       if (isSquareAttackedBy(testBoard as typeof board, kingSq, color === 'w' ? 'b' : 'w')) continue;
       board[sq] = null;
-      if (targetRow === promRow) board[target] = makePiece(color, 'Q');
-      else board[target] = pawnStr;
+      board[target] = targetRow === promRow ? makePiece(color, 'Q') : pawnStr;
     }
 
     return { newState: next, logEntry: `Pawn Storm: all ${color} pawns advanced`, materialDelta: 0 };

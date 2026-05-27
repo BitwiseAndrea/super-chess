@@ -260,6 +260,60 @@ describe('Pawn Storm', () => {
       expect(newState.chess.board[sq(String.fromCharCode(97 + file) + '7')]).toBe('bP');
     }
   });
+
+  // ─── color symmetry ──────────────────────────────────────────────────────
+  //
+  // Regression: original implementation iterated the board 0→63 while writing
+  // moved pawns ahead of the cursor. For black (dir=+8) that re-read each
+  // just-moved pawn and advanced it AGAIN, cascading every black pawn down
+  // to rank 3 instead of rank 6. The four white-only tests above never
+  // exercised this. The next four mirror them for black.
+
+  it('advances every unblocked black pawn by exactly one square', () => {
+    const state = makeState();
+    const before = pawnCount(state, 'b');
+    const { newState } = CARD_EFFECTS['Pawn Storm'](state, 'b', {});
+    expect(pawnCount(newState, 'b')).toBe(before);
+    for (let file = 0; file < 8; file++) {
+      const f = String.fromCharCode(97 + file);
+      // each pawn moved from rank 7 to rank 6 — one square, not five.
+      expect(newState.chess.board[sq(f + '6')]).toBe('bP');
+      expect(newState.chess.board[sq(f + '7')]).toBeNull();
+      // explicitly assert the cascade bug is gone: nothing past rank 6.
+      expect(newState.chess.board[sq(f + '5')]).toBeNull();
+      expect(newState.chess.board[sq(f + '4')]).toBeNull();
+      expect(newState.chess.board[sq(f + '3')]).toBeNull();
+    }
+  });
+
+  it('black: does not advance pawns into occupied squares', () => {
+    // White pawn on e6 blocks the black e-pawn.
+    const state = makeState('rnbqkbnr/pppppppp/4P3/8/8/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1');
+    const { newState } = CARD_EFFECTS['Pawn Storm'](state, 'b', {});
+    expect(newState.chess.board[sq('e7')]).toBe('bP'); // blocked, still on e7
+    expect(newState.chess.board[sq('e6')]).toBe('wP'); // blocker untouched
+    // other black pawns still moved one square (not cascaded).
+    expect(newState.chess.board[sq('d6')]).toBe('bP');
+    expect(newState.chess.board[sq('d7')]).toBeNull();
+    expect(newState.chess.board[sq('d5')]).toBeNull(); // would be set if cascading
+  });
+
+  it('black: auto-promotes pawns reaching the back rank to a queen', () => {
+    const state = makeState('4k2K/8/8/8/8/8/p7/8 b - - 0 1');
+    const { newState } = CARD_EFFECTS['Pawn Storm'](state, 'b', {});
+    expect(newState.chess.board[sq('a1')]).toBe('bQ');
+    expect(newState.chess.board[sq('a2')]).toBeNull();
+  });
+
+  it('black: only advances pawns of the played color', () => {
+    const state = makeState();
+    const whiteBefore = pawnCount(state, 'w');
+    const { newState } = CARD_EFFECTS['Pawn Storm'](state, 'b', {});
+    expect(pawnCount(newState, 'w')).toBe(whiteBefore);
+    for (let file = 0; file < 8; file++) {
+      expect(newState.chess.board[sq(String.fromCharCode(97 + file) + '2')]).toBe('wP');
+    }
+  });
 });
 
 describe('Promotion Rush', () => {

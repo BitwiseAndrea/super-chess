@@ -14,6 +14,8 @@ import { HeuristicCardAI } from '../../ai/heuristicCardAI.ts';
 import { showNewGamePanel, type NewGameConfig } from './newGamePanel.ts';
 import { setOpenOpponentHandPref } from './prefs.ts';
 import { THEME, onThemeChange } from '../theme.ts';
+import { DebugLog } from './debugLog.ts';
+import { showBugReportModal } from './bugReportModal.ts';
 
 export function renderPlayMode(root: HTMLElement): void {
   root.innerHTML = '';
@@ -30,6 +32,10 @@ function mountGame(root: HTMLElement, cfg: NewGameConfig): void {
   let revealOpponent = cfg.openOpponentHand;
   const layout = buildLayout(root, cfg);
 
+  // Session-wide debug log — captures bot decisions, card applications,
+  // and validation findings. Surfaced by the bug-report modal.
+  const debugLog = new DebugLog();
+
   layout.newGameBtn.addEventListener('click', () => {
     if (confirm('Resign and start a new game?')) {
       renderPlayMode(root);
@@ -44,6 +50,20 @@ function mountGame(root: HTMLElement, cfg: NewGameConfig): void {
   });
   updateHandToggle(layout.handToggleBtn, revealOpponent);
 
+  layout.bugReportBtn.addEventListener('click', () => {
+    showBugReportModal({
+      state: controller.getState(),
+      debugLog,
+      config: {
+        humanColor: cfg.humanColor,
+        botLabel: cfg.botLabel,
+        botDepth: cfg.botDepth,
+        openOpponentHand: cfg.openOpponentHand,
+        revealOpponent,
+      },
+    });
+  });
+
   // Higher difficulty gets a longer minimum think time so it feels more
   // deliberate. (Depth 3 search often exceeds these anyway.)
   const thinkByDepth = { 1: 550, 2: 800, 3: 1100 } as const;
@@ -56,6 +76,7 @@ function mountGame(root: HTMLElement, cfg: NewGameConfig): void {
     botMinThinkMs: minThink,
     humanMoveSettleMs: 280,
     onRequestNewGame: () => renderPlayMode(root),
+    debugLog,
   });
 
   const board = new BoardRenderer(layout.board, { interactive: true });
@@ -132,6 +153,7 @@ interface Layout {
   slowGameChip: HTMLElement;
   newGameBtn: HTMLElement;
   handToggleBtn: HTMLButtonElement;
+  bugReportBtn: HTMLButtonElement;
   board: HTMLElement;
   oppCaptured: HTMLElement;
   youCaptured: HTMLElement;
@@ -207,6 +229,12 @@ function buildLayout(root: HTMLElement, cfg: NewGameConfig): Layout {
   handToggleBtn.className = 'sc-btn';
   handToggleBtn.title = 'Show / hide the opponent\u2019s cards';
   header.appendChild(handToggleBtn);
+
+  const bugReportBtn = document.createElement('button');
+  bugReportBtn.className = 'sc-btn';
+  bugReportBtn.title = 'Capture game state + recent debug log for a bug report';
+  bugReportBtn.innerHTML = '\u{1F41E} bug report';
+  header.appendChild(bugReportBtn);
 
   const newGameBtn = document.createElement('button');
   newGameBtn.className = 'sc-btn';
@@ -349,6 +377,7 @@ function buildLayout(root: HTMLElement, cfg: NewGameConfig): Layout {
 
   return {
     header, turnIndicator, botLabel, slowGameChip, newGameBtn, handToggleBtn,
+    bugReportBtn,
     board, oppCaptured, youCaptured, oppLabel, youLabel,
     oppHand, youHand, log, banner,
   };

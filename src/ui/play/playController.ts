@@ -11,7 +11,7 @@
 // The controller is rendering-agnostic; it raises an `onChange` callback the
 // PlayPanel listens to. All DOM lives in playPanel.ts.
 
-import type { PieceColor, Move, Square, PieceType } from '../../engine/types.ts';
+import type { PieceColor, Move, Square } from '../../engine/types.ts';
 import type { SuperChessState, CardTarget, CardPlayRecord } from '../../game/types.ts';
 import type { CardInstance, CardDefinition } from '../../cards/types.ts';
 import type { ChessAI, CardAI } from '../../ai/types.ts';
@@ -30,6 +30,8 @@ import {
 } from '../../game/rules.ts';
 import { destinationsFor } from '../board.ts';
 import { showPromotionPicker, showPieceTypePicker, showGameOverModal } from './modals.ts';
+import type { DebugLog } from './debugLog.ts';
+import { validateState } from '../../game/debug.ts';
 
 export interface PlayConfig {
   humanColor: PieceColor;
@@ -42,6 +44,10 @@ export interface PlayConfig {
   /** Pause after the human's move before the bot starts thinking. Default 260. */
   humanMoveSettleMs?: number;
   onRequestNewGame?: () => void; // called when user picks "new game" in the game-over modal
+  /** Optional session log used by the bug-report modal. The controller
+   * pushes structured events here (bot decisions, card applications,
+   * validation warnings) without coupling to any UI. */
+  debugLog?: DebugLog;
 }
 
 export type CardTargetingPhase =
@@ -113,6 +119,21 @@ export class PlayController {
       snapshots: [],
     };
     this.recordPosition();
+    this.cfg.debugLog?.info('session', 'new game', {
+      humanColor: this.cfg.humanColor,
+      maxMoves: this.cfg.maxMoves,
+      botMinThinkMs: this.cfg.botMinThinkMs,
+    });
+  }
+
+  /** Expose the controller's current state to callers that need a snapshot
+   * (e.g. the bug-report modal). Read-only by contract — DO NOT mutate. */
+  getState(): SuperChessState {
+    return this.state;
+  }
+
+  getConfig(): Readonly<PlayConfig> {
+    return this.cfg;
   }
 
   onChange(cb: (vm: PlayViewModel) => void): void {
@@ -267,6 +288,7 @@ export class PlayController {
   private async applyCard(card: CardInstance, target: CardTarget): Promise<void> {
     const effectFn = CARD_EFFECTS[card.definition.name];
     if (!effectFn) {
+      this.cfg.debugLog?.error('card', `no effect handler for "${card.definition.name}"`);
       this.cardPhase = { kind: 'none' };
       this.emit();
       return;
@@ -275,11 +297,16 @@ export class PlayController {
     const result = effectFn(this.state, color, target);
     if (result.newState === this.state) {
       // Effect was a no-op (invalid). Keep card in hand, clear targeting.
+      this.cfg.debugLog?.warn('card', `${card.definition.name}: no-op`, { target });
       this.flashBanner(`${card.definition.name}: nothing to do`);
       this.cardPhase = { kind: 'none' };
       this.emit();
       return;
     }
+
+    this.cfg.debugLog?.info('card', `human played ${card.definition.name}`, {
+      target, logEntry: result.logEntry, materialDelta: result.materialDelta,
+    });
 
     this.state = result.newState;
 
@@ -315,6 +342,7 @@ export class PlayController {
         pawnMovedOrCaptured: true,
       });
       this.recordPosition();
+      this.runSelfCheck();
       this.emit();
 
       if (this.detectGameOver()) return;
@@ -324,6 +352,7 @@ export class PlayController {
       return;
     }
 
+    this.runSelfCheck();
     this.emit();
   }
 
@@ -356,6 +385,10 @@ export class PlayController {
     this.emit();
 
     const color: PieceColor = this.cfg.humanColor === 'w' ? 'b' : 'w';
+    this.cfg.debugLog?.info('bot', `turn start (${color})`, {
+      turn: this.state.chess.fullMoveNumber,
+      handSize: this.deck.getHand(color).length,
+    });
 
     // Small delay so the "thinking" indicator paints before the AI starts.
     await microPause(60);
@@ -366,12 +399,24 @@ export class PlayController {
     const hand = this.deck.getHand(color);
     if (hand.length > 0) {
       try {
+        const cardDecideStart = performance.now();
         const decision = await this.cfg.cardAI.decide(this.state, color, hand);
+        this.cfg.debugLog?.info('bot', 'card decision', {
+          tookMs: Math.round(performance.now() - cardDecideStart),
+          play: decision.shouldPlay,
+          card: decision.card?.definition.name ?? null,
+          target: decision.target,
+        });
         if (decision.shouldPlay && decision.card && decision.target !== undefined) {
           const effectFn = CARD_EFFECTS[decision.card.definition.name];
           if (effectFn) {
             const result = effectFn(this.state, color, decision.target);
             if (result.newState !== this.state) {
+              this.cfg.debugLog?.info('card', `bot played ${decision.card.definition.name}`, {
+                target: decision.target,
+                logEntry: result.logEntry,
+                materialDelta: result.materialDelta,
+              });
               this.state = result.newState;
               this.state.history.push({
                 type: 'cardPlay',
@@ -403,12 +448,18 @@ export class PlayController {
                   pawnMovedOrCaptured: true,
                 });
                 this.recordPosition();
+                this.runSelfCheck();
+              } else {
+                this.runSelfCheck();
               }
             }
           }
         }
       } catch (err) {
-        console.warn('[bot card decision]', err);
+        this.cfg.debugLog?.error('bot', 'card decision threw', {
+          message: (err as Error).message,
+          stack: (err as Error).stack,
+        });
       }
     }
 
@@ -434,10 +485,26 @@ export class PlayController {
 
     let move: Move;
     try {
+      const moveStart = performance.now();
       const raw = await this.cfg.chessAI.selectMove(this.state, color);
-      move = legal.find((m) => m.from === raw.from && m.to === raw.to && m.promotion === raw.promotion) ?? legal[0];
+      const found = legal.find((m) => m.from === raw.from && m.to === raw.to && m.promotion === raw.promotion);
+      if (!found) {
+        this.cfg.debugLog?.warn('bot', 'AI returned a move not in legal set; falling back to legal[0]', {
+          ai: { from: raw.from, to: raw.to, promotion: raw.promotion },
+          fallback: { from: legal[0].from, to: legal[0].to },
+        });
+      }
+      move = found ?? legal[0];
+      this.cfg.debugLog?.info('bot', 'chess move selected', {
+        tookMs: Math.round(performance.now() - moveStart),
+        from: move.from, to: move.to, promotion: move.promotion,
+        legalCount: legal.length,
+      });
     } catch (err) {
-      console.warn('[bot chess move]', err);
+      this.cfg.debugLog?.error('bot', 'chess AI threw', {
+        message: (err as Error).message,
+        stack: (err as Error).stack,
+      });
       move = legal[0];
     }
 
@@ -532,6 +599,26 @@ export class PlayController {
     this.state.deck = this.deck.getState();
 
     this.recordPosition();
+    this.runSelfCheck();
+  }
+
+  /** Run lightweight invariant checks after each commit. Any errors are
+   * logged to the debug buffer with full state context; warnings are
+   * logged but not flashed in the UI to avoid spam. The bug-report modal
+   * surfaces both. */
+  private runSelfCheck(): void {
+    if (!this.cfg.debugLog) return;
+    const result = validateState(this.state);
+    for (const issue of result.errors) {
+      this.cfg.debugLog.error('validate', issue.message, {
+        tag: issue.tag, square: issue.square,
+      });
+    }
+    for (const issue of result.warnings) {
+      this.cfg.debugLog.warn('validate', issue.message, {
+        tag: issue.tag, square: issue.square,
+      });
+    }
   }
 
   /** Friendly banner for any card draw — opponent or you. The "slow-game"
