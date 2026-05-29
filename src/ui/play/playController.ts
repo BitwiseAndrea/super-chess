@@ -74,6 +74,14 @@ export interface PlayConfig {
    * removes the card from the deck, a positive value replaces the JSON
    * `copies` count. Cards not present in the map keep their defaults. */
   cardOverrides?: Record<string, number>;
+  /** Pre-built (state, deck) pair from the load-game flow. When set, the
+   * controller bypasses its default initialization \u2014 no deck rebuild,
+   * no shuffle, no starting-hand deal \u2014 and resumes from the snapshot.
+   * The `enabledCategories` / `cardOverrides` / `maxHandSize` fields are
+   * ignored in this mode (the loader has already configured the deck).
+   * Used by the "load from saved state" UI for testers reproducing a
+   * specific position; not used by the normal play flow. */
+  loadedSnapshot?: { state: SuperChessState; deck: Deck };
 }
 
 export type CardTargetingPhase =
@@ -203,6 +211,30 @@ export class PlayController {
       ...cfg,
     };
     this.drawRules = this.cfg.drawRules ?? DEFAULT_DRAW_RULES;
+    if (cfg.loadedSnapshot) {
+      // Snapshot path: trust the loader. We deep-clone the deck reference
+      // by simply taking it (loadGame.ts produced it for us, and nothing
+      // else has a handle), and reuse the pre-built state. Skip the
+      // shuffle + dealStartingHand entirely \u2014 the snapshot already
+      // contains its own hands.
+      this.deck = cfg.loadedSnapshot.deck;
+      this.state = cfg.loadedSnapshot.state;
+      this.turnOwner = this.state.chess.turn;
+      // We don't have history to rebuild positionCounts from, so we
+      // record the starting position as the only known one. Three-fold
+      // repetition is therefore measured from the load point forward,
+      // which is the correct behavior for resumed games.
+      this.recordPosition();
+      this.cfg.debugLog?.info('session', 'new game (loaded from snapshot)', {
+        humanColor: this.cfg.humanColor,
+        fen: undefined,
+        loadedHands: {
+          w: this.deck.getHand('w').length,
+          b: this.deck.getHand('b').length,
+        },
+      });
+      return;
+    }
     const overridesList = this.cfg.cardOverrides
       ? Object.entries(this.cfg.cardOverrides).map(([name, copies]) => ({ name, copies }))
       : undefined;
@@ -555,13 +587,21 @@ export class PlayController {
 
   async handleSquareClick(sq: Square): Promise<void> {
     if (this.botThinking || this.state.result) return;
-    if (this.state.chess.turn !== this.cfg.humanColor) return;
 
-    // Card targeting takes precedence.
+    // Card targeting takes precedence. The targeting flow uses `turnOwner`,
+    // NOT `chess.turn` \u2014 in post-phase the engine has already flipped
+    // chess.turn to the bot but the human still owns the turn-phase and
+    // is mid-card-flow. Without this branch, e.g. playing Freeze after
+    // your move would silently drop the target click.
     if (this.cardPhase.kind !== 'none') {
+      if (this.turnOwner !== this.cfg.humanColor) return;
       await this.handleCardTargetClick(sq);
       return;
     }
+
+    // Move flow: must actually be the human's chess turn (not just the
+    // post-phase, where the move already happened).
+    if (this.state.chess.turn !== this.cfg.humanColor) return;
 
     const piece = this.state.chess.board[sq];
 

@@ -13,6 +13,7 @@ import { PlayController, type PlayViewModel } from './playController.ts';
 import { MinimaxAI } from '../../ai/minimaxAI.ts';
 import { HeuristicCardAI } from '../../ai/heuristicCardAI.ts';
 import { showNewGamePanel, type NewGameConfig } from './newGamePanel.ts';
+import type { LoadedGame } from '../../game/loadGame.ts';
 import { THEME, onThemeChange } from '../theme.ts';
 import { DebugLog } from './debugLog.ts';
 import { showBugReportModal } from './bugReportModal.ts';
@@ -24,10 +25,25 @@ export function renderPlayMode(root: HTMLElement): void {
     onStart: (cfg) => {
       mountGame(root, cfg);
     },
+    onLoad: (loaded) => {
+      // Compose a NewGameConfig out of the loaded snapshot's hints,
+      // falling back to safe defaults. Card-pool fields are unused by
+      // the loaded path (the deck is already populated) but we set
+      // them so the rest of the UI doesn't see undefined.
+      const cfg: NewGameConfig = {
+        humanColor: loaded.configHints.humanColor ?? 'w',
+        botDepth: loaded.configHints.botDepth ?? 2,
+        botLabel: loaded.configHints.botLabel ?? 'normal',
+        openOpponentHand: loaded.configHints.openOpponentHand ?? false,
+        enabledCategories: ['default'],
+        maxHandSize: loaded.configHints.maxHandSize ?? loaded.deck.maxHandSize,
+      };
+      mountGame(root, cfg, loaded);
+    },
   });
 }
 
-function mountGame(root: HTMLElement, cfg: NewGameConfig): void {
+function mountGame(root: HTMLElement, cfg: NewGameConfig, loaded?: LoadedGame): void {
   root.innerHTML = '';
   // Hand visibility is a STATE chosen on the new-game page \u2014 not an
   // in-game action \u2014 so it's locked for the duration of this game.
@@ -115,6 +131,7 @@ function mountGame(root: HTMLElement, cfg: NewGameConfig): void {
     enabledCategories: cfg.enabledCategories,
     maxHandSize: cfg.maxHandSize,
     cardOverrides: cfg.cardOverrides,
+    loadedSnapshot: loaded ? { state: loaded.state, deck: loaded.deck } : undefined,
   });
 
   const board = new BoardRenderer(layout.board, { interactive: true });

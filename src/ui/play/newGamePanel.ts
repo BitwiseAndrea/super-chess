@@ -2,6 +2,7 @@
 // Pre-game setup overlay: pick your side and bot difficulty, then start.
 import type { PieceColor } from '../../engine/types.ts';
 import type { CardCategory } from '../../cards/types.ts';
+import type { LoadedGame } from '../../game/loadGame.ts';
 import { CARD_POOL_GROUPS, CARD_DEFINITIONS } from '../../cards/definitions.ts';
 import {
   getOpenOpponentHandPref,
@@ -17,6 +18,7 @@ import {
   CARD_OVERRIDE_MIN,
   CARD_OVERRIDE_MAX,
 } from './prefs.ts';
+import { showLoadGameModal } from './loadGameModal.ts';
 
 export interface NewGameConfig {
   humanColor: PieceColor;
@@ -42,6 +44,12 @@ const DIFFICULTIES: Array<{ key: string; label: string; depth: number; blurb: st
 
 export function showNewGamePanel(opts: {
   onStart: (cfg: NewGameConfig) => void;
+  /** Optional: when set, the new-game panel exposes a "load from saved
+   * state" affordance. Firing the callback hands a parsed snapshot to
+   * the caller (typically renderPlayMode) which is responsible for
+   * dismissing this panel and bootstrapping mountGame from the
+   * snapshot instead of a fresh deal. */
+  onLoad?: (loaded: LoadedGame) => void;
 }): HTMLElement {
   const overlay = document.createElement('div');
   // Outer overlay never scrolls itself — it just provides the dimmed
@@ -435,6 +443,56 @@ export function showNewGamePanel(opts: {
     });
   });
   footer.appendChild(startBtn);
+
+  // "load from saved state" \u2014 secondary affordance for testers /
+  // anyone reproducing a position. Hidden when the caller hasn't
+  // supplied an onLoad handler so the new-game panel stays clean for
+  // ad-hoc / non-play entry points.
+  if (opts.onLoad) {
+    const loadRow = document.createElement('div');
+    loadRow.style.cssText = `
+      display: flex; align-items: center; justify-content: center;
+      margin-top: 10px;
+      font-family: system-ui, sans-serif;
+    `;
+    const loadLink = document.createElement('button');
+    loadLink.type = 'button';
+    loadLink.style.cssText = `
+      background: transparent; border: none; padding: 4px 8px;
+      color: var(--sc-text-secondary);
+      font-size: 11.5px; letter-spacing: 0.06em; text-transform: lowercase;
+      cursor: pointer;
+      text-decoration: underline; text-underline-offset: 2px;
+      font-family: inherit;
+    `;
+    loadLink.textContent = '\u00b7 load from saved state (json) \u00b7';
+    loadLink.addEventListener('click', () => {
+      showLoadGameModal({
+        onLoad: (loaded) => {
+          // Persist the same prefs the start-game path persists (so a
+          // subsequent fresh game inherits the side they just chose).
+          // We DO NOT persist deck composition because the loaded state
+          // bypasses the configured pool.
+          const humanColor: PieceColor = loaded.configHints.humanColor
+            ?? (selectedSide === 'random' ? (Math.random() < 0.5 ? 'w' : 'b') : selectedSide);
+          setOpenOpponentHandPref(openHand);
+          overlay.remove();
+          opts.onLoad!({
+            ...loaded,
+            configHints: {
+              ...loaded.configHints,
+              humanColor,
+              botLabel: loaded.configHints.botLabel ?? selectedDiff.label,
+              botDepth: loaded.configHints.botDepth ?? selectedDiff.depth,
+              openOpponentHand: loaded.configHints.openOpponentHand ?? openHand,
+            },
+          });
+        },
+      });
+    });
+    loadRow.appendChild(loadLink);
+    footer.appendChild(loadRow);
+  }
 
   document.body.appendChild(overlay);
   return overlay;

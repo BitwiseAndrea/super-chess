@@ -18,6 +18,7 @@ import type { SuperChessState } from '../../../src/game/types.ts';
 import type { CardInstance } from '../../../src/cards/types.ts';
 import type { Move, PieceColor } from '../../../src/engine/types.ts';
 import { getSuperChessLegalMoves } from '../../../src/game/rules.ts';
+import { CARD_DEFINITIONS } from '../../../src/cards/definitions.ts';
 
 /** Stub ChessAI that always picks the first legal move it finds. Avoids
  * the real minimax search so tests run in milliseconds. */
@@ -165,6 +166,79 @@ describe('PlayController play-phase model', () => {
       await controller.endTurnExplicit();
       expect(vm!.state.chess.fullMoveNumber).toBe(beforeTurn);
       expect(vm!.turnPhase).toBe(beforePhase);
+    });
+  });
+
+  describe('post-phase card targeting', () => {
+    // Regression test for a real bug: after the human's chess move,
+    // chess.turn flips to the opponent. The pre-phase model used
+    // chess.turn === humanColor as a hard gate in handleSquareClick,
+    // which silently swallowed clicks on opponent pieces during the
+    // human's post-card targeting flow (e.g. clicking "Freeze the
+    // remaining knight" did nothing).
+    it('lets the human target an opponent piece for a post-phase card after their move', async () => {
+      // Stub a CardAI that never plays anything — we want to drive the
+      // human's post-card flow ourselves.
+      const cardAI = new NeverPlayCardAI();
+      const controller = makeController({ cardAI });
+
+      const freezeDef = CARD_DEFINITIONS.find((d) => d.name === 'Freeze');
+      expect(freezeDef, 'Freeze must exist in card data').toBeDefined();
+
+      await controller.start();
+
+      // Inject a Freeze card directly into white's hand. We bypass the
+      // deck draw flow because the default starting hand is small and
+      // non-deterministic w.r.t. which card it includes; this keeps the
+      // test focused on the targeting bug and not on the deck.
+      const deck = (controller as unknown as { deck: { addToHand: (c: PieceColor, card: CardInstance) => void } }).deck;
+      const freezeInstance: CardInstance = { id: 'freeze_test', definition: freezeDef! };
+      deck.addToHand('w', freezeInstance);
+
+      // White move e2 -> e3 (squares 52 -> 44). After this, the
+      // controller transitions to ('w', 'post') with chess.turn = 'b'.
+      await controller.handleSquareClick(52);
+      await controller.handleSquareClick(44);
+      // Settle any microtasks the controller queued.
+      await new Promise((r) => setTimeout(r, 5));
+
+      // We're now in post-phase. Confirm the precondition the bug hit:
+      // chess.turn has flipped to 'b' but the human still owns the turn.
+      let vm: PlayViewModel | null = null;
+      controller.onChange((next) => { vm = next; });
+      // Trigger a synthetic emit by calling a no-op-ish API to capture VM.
+      (controller as unknown as { emit: () => void }).emit();
+      expect(vm).not.toBeNull();
+      expect(vm!.turnOwner).toBe('w');
+      expect(vm!.turnPhase).toBe('post');
+      expect(vm!.state.chess.turn).toBe('b');
+      expect(vm!.postPhaseAwaitingHuman).toBe(true);
+
+      // Click the Freeze card → enters card-targeting mode.
+      await controller.handleCardClick(freezeInstance);
+
+      // Pick any black piece on the board to freeze. Choose the first
+      // non-king black piece we can find for stability.
+      const board = vm!.state.chess.board;
+      let targetSq = -1;
+      for (let i = 0; i < 64; i++) {
+        const p = board[i];
+        if (p && p[0] === 'b' && p[1] !== 'K') {
+          targetSq = i;
+          break;
+        }
+      }
+      expect(targetSq, 'expected at least one non-king black piece').toBeGreaterThanOrEqual(0);
+
+      // Click that square. Pre-fix this returned silently because
+      // chess.turn !== humanColor. Post-fix the card-targeting branch
+      // uses turnOwner instead and the freeze should land.
+      await controller.handleSquareClick(targetSq);
+      await new Promise((r) => setTimeout(r, 5));
+
+      // Verify the freeze actually applied.
+      const frozen = vm!.state.superState.frozenSquares;
+      expect(frozen.has(targetSq)).toBe(true);
     });
   });
 });
