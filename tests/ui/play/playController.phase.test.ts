@@ -169,6 +169,41 @@ describe('PlayController play-phase model', () => {
     });
   });
 
+  describe('selection toggle', () => {
+    // Clicking an already-selected piece should deselect it, so the user
+    // doesn't have to click an empty square to bail out of a selection.
+    it('deselects the piece when clicked a second time', async () => {
+      const controller = makeController();
+      let vm: PlayViewModel | null = null;
+      controller.onChange((next) => { vm = next; });
+      await controller.start();
+
+      // e2 = square 52 (a8=0, h1=63). White pawn there in the starting
+      // position.
+      await controller.handleSquareClick(52);
+      expect(vm!.selectedSquare).toBe(52);
+
+      // Re-click same square \u2192 deselect.
+      await controller.handleSquareClick(52);
+      expect(vm!.selectedSquare).toBeNull();
+    });
+
+    it('reselects a different own piece without intermediate empty click', async () => {
+      // Sanity: the deselect branch shouldn't break the normal flow of
+      // selecting one piece and then directly clicking another. Clicking
+      // a different own piece should switch the selection, not deselect.
+      const controller = makeController();
+      let vm: PlayViewModel | null = null;
+      controller.onChange((next) => { vm = next; });
+      await controller.start();
+
+      await controller.handleSquareClick(52); // e2
+      expect(vm!.selectedSquare).toBe(52);
+      await controller.handleSquareClick(53); // f2
+      expect(vm!.selectedSquare).toBe(53);
+    });
+  });
+
   describe('post-phase card targeting', () => {
     // Regression test for a real bug: after the human's chess move,
     // chess.turn flips to the opponent. The pre-phase model used
@@ -184,6 +219,15 @@ describe('PlayController play-phase model', () => {
 
       const freezeDef = CARD_DEFINITIONS.find((d) => d.name === 'Freeze');
       expect(freezeDef, 'Freeze must exist in card data').toBeDefined();
+
+      // Capture every VM emitted so we can verify the freeze actually
+      // landed AT THE MOMENT IT FIRED. We can't just check at the end of
+      // the test: the bot's commitMove ticks the 1-ply freeze counter
+      // down to 0, removing it from frozenSquares. That's the desired
+      // post-card timing (see SuperState type comment); this test is
+      // strictly about the targeting click landing.
+      const vms: PlayViewModel[] = [];
+      controller.onChange((vm) => { vms.push(vm); });
 
       await controller.start();
 
@@ -204,22 +248,18 @@ describe('PlayController play-phase model', () => {
 
       // We're now in post-phase. Confirm the precondition the bug hit:
       // chess.turn has flipped to 'b' but the human still owns the turn.
-      let vm: PlayViewModel | null = null;
-      controller.onChange((next) => { vm = next; });
-      // Trigger a synthetic emit by calling a no-op-ish API to capture VM.
-      (controller as unknown as { emit: () => void }).emit();
-      expect(vm).not.toBeNull();
-      expect(vm!.turnOwner).toBe('w');
-      expect(vm!.turnPhase).toBe('post');
-      expect(vm!.state.chess.turn).toBe('b');
-      expect(vm!.postPhaseAwaitingHuman).toBe(true);
+      const postPhaseVm = vms[vms.length - 1];
+      expect(postPhaseVm.turnOwner).toBe('w');
+      expect(postPhaseVm.turnPhase).toBe('post');
+      expect(postPhaseVm.state.chess.turn).toBe('b');
+      expect(postPhaseVm.postPhaseAwaitingHuman).toBe(true);
 
       // Click the Freeze card → enters card-targeting mode.
       await controller.handleCardClick(freezeInstance);
 
       // Pick any black piece on the board to freeze. Choose the first
       // non-king black piece we can find for stability.
-      const board = vm!.state.chess.board;
+      const board = postPhaseVm.state.chess.board;
       let targetSq = -1;
       for (let i = 0; i < 64; i++) {
         const p = board[i];
@@ -236,9 +276,62 @@ describe('PlayController play-phase model', () => {
       await controller.handleSquareClick(targetSq);
       await new Promise((r) => setTimeout(r, 5));
 
-      // Verify the freeze actually applied.
-      const frozen = vm!.state.superState.frozenSquares;
-      expect(frozen.has(targetSq)).toBe(true);
+      // Verify some emitted VM observed the freeze on the target square.
+      // We don't care WHEN exactly — just that it landed at all. Once
+      // the bot's commitMove ticks (1 → 0), the freeze is gone, but
+      // before that tick fires there must be a snapshot showing it.
+      const sawFreeze = vms.some((v) => v.state.superState.frozenSquares.has(targetSq));
+      expect(sawFreeze).toBe(true);
+    });
+  });
+
+  describe('post-phase card expiration timing', () => {
+    // Regression for "When my turn starts but I played a shield last
+    // time, it shouldn't show on my turn — it should expire before I
+    // start." The post-card was using counter=2, which meant the effect
+    // leaked from the SETTER's post-phase, through the opponent's turn,
+    // and into the SETTER's NEXT pre-phase. With counter=1 the effect
+    // covers exactly the opponent's upcoming move and clears before our
+    // next turn begins.
+    it('Shield played as post-card is gone before the human\u2019s next turn', async () => {
+      const cardAI = new NeverPlayCardAI();
+      const controller = makeController({ cardAI });
+
+      const shieldDef = CARD_DEFINITIONS.find((d) => d.name === 'Shield');
+      expect(shieldDef, 'Shield must exist in card data').toBeDefined();
+
+      await controller.start();
+
+      const deck = (controller as unknown as { deck: { addToHand: (c: PieceColor, card: CardInstance) => void } }).deck;
+      const shieldInstance: CardInstance = { id: 'shield_test', definition: shieldDef! };
+      deck.addToHand('w', shieldInstance);
+
+      let vm: PlayViewModel | null = null;
+      controller.onChange((next) => { vm = next; });
+
+      // Move e2 → e3 (52 → 44). Pawn's start square is 52; after the
+      // move it sits on 44. We'll shield 44 next.
+      await controller.handleSquareClick(52);
+      await controller.handleSquareClick(44);
+      await new Promise((r) => setTimeout(r, 5));
+
+      // Now in human post-phase. Play Shield on the pawn at e3 (square 44).
+      await controller.handleCardClick(shieldInstance);
+      await controller.handleSquareClick(44);
+
+      // The full bot turn should run automatically (NeverPlayCardAI
+      // skips cards, FirstMoveAI plays the first legal move). Wait for
+      // the bot to finish so we're back at the human's pre-phase.
+      await new Promise((r) => setTimeout(r, 80));
+
+      expect(vm).not.toBeNull();
+      // Back at human's pre-phase of the NEXT turn.
+      expect(vm!.turnOwner).toBe('w');
+      expect(vm!.turnPhase).toBe('pre');
+      // The shield should be GONE — it covered exactly black's move and
+      // tickSuperState (during black's commitMove) cleared it.
+      expect(vm!.state.superState.shieldedSquares.size).toBe(0);
+      expect(vm!.state.superState.shieldTurns.size).toBe(0);
     });
   });
 });

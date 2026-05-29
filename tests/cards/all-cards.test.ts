@@ -89,14 +89,15 @@ describe("Knight's Path", () => {
 });
 
 describe('Freeze', () => {
-  it('freezes an opponent piece with a 2-ply timer (survives setter\u2019s tick, expires after opponent\u2019s tick)', () => {
+  it('freezes an opponent piece with a 1-ply timer (POST card timing)', () => {
     const state = makeState();
     const target = sq('e7'); // black pawn
     const { newState } = CARD_EFFECTS.Freeze(state, 'w', { oppPieceSquare: target });
-    // 2 plies, not 1 — see SuperState type comment. With timer=1 the
-    // effect was being ticked off on the FREEZER's own tick and the
-    // opponent never saw it (the original bug).
-    expect(newState.superState.frozenSquares.get(target)).toBe(2);
+    // 1 ply, not 2 — see SuperState type comment. Freeze is a POST card,
+    // so the setter's move-tick fires BEFORE the freeze is set; that means
+    // 1 → 0 on the opponent's tick clears it cleanly. With timer=2 the
+    // freeze leaks into the SETTER's next turn (playtester complaint).
+    expect(newState.superState.frozenSquares.get(target)).toBe(1);
   });
 
   it('refuses to freeze the king', () => {
@@ -106,31 +107,33 @@ describe('Freeze', () => {
     expect(logEntry).toMatch(/king/i);
   });
 
-  // Regression for the "Freeze never reaches opponent" bug. We mimic the
-  // real game flow: setter ticks once after their own ply, then the
-  // opponent has a turn (which ticks at the end). After the full cycle
-  // the freeze MUST have been active for exactly one of the opponent's
-  // plies, and must NOT be present once they've ticked through it.
-  it('stays active through opponent\u2019s ply and is cleared by the second tick', () => {
+  // Regression for the "Freeze leaks into setter's next turn" complaint. We
+  // mimic the real POST-card flow: Freeze fires AFTER the setter's move-tick
+  // (so we don't simulate that tick here). Then the opponent has a ply that
+  // ticks at the end. After the opponent's tick the freeze MUST be cleared,
+  // so the setter's next turn does NOT see it.
+  it('is active during opponent\u2019s ply and cleared before setter\u2019s next turn', () => {
     const state = makeState();
     const target = sq('e7');
-    const after = CARD_EFFECTS.Freeze(state, 'w', { oppPieceSquare: target }).newState;
-    // Setter's tick (end of white's move):
-    const afterSetterTick = { ...after, superState: tickSuperState(after.superState) };
-    expect(afterSetterTick.superState.frozenSquares.get(target)).toBe(1);
-    // Opponent's tick (end of black's move):
-    const afterOppTick = { ...afterSetterTick, superState: tickSuperState(afterSetterTick.superState) };
+    const afterPlay = CARD_EFFECTS.Freeze(state, 'w', { oppPieceSquare: target }).newState;
+    // Effect is live for the opponent's upcoming ply.
+    expect(afterPlay.superState.frozenSquares.get(target)).toBe(1);
+    // Opponent's tick (end of black's move) clears it.
+    const afterOppTick = { ...afterPlay, superState: tickSuperState(afterPlay.superState) };
     expect(afterOppTick.superState.frozenSquares.has(target)).toBe(false);
   });
 });
 
 describe('Shield', () => {
-  it('shields a piece for 2 turns', () => {
+  it('shields a piece with a 1-ply timer (POST card timing)', () => {
     const state = makeState();
     const target = sq('e2');
     const { newState } = CARD_EFFECTS.Shield(state, 'w', { ownPieceSquare: target });
     expect(newState.superState.shieldedSquares.get(target)).toBe('w');
-    expect(newState.superState.shieldTurns.get(target)).toBe(2);
+    // 1 ply: Shield is POST, so the setter's tick has already happened.
+    // Opp's tick will drop it cleanly to 0 by our next turn. See
+    // SuperState type comment.
+    expect(newState.superState.shieldTurns.get(target)).toBe(1);
   });
 
   it('does nothing if the source square is empty', () => {
@@ -786,27 +789,28 @@ describe('Sidestep', () => {
 });
 
 describe('Foul Ground', () => {
-  it('marks a square as fouled for the opponent with a 2-ply timer', () => {
+  it('marks a square as fouled for the opponent with a 1-ply timer (POST card)', () => {
     const state = makeState();
     const target = sq('e4');
     const { newState } = CARD_EFFECTS['Foul Ground'](state, 'w', { square: target });
     expect(newState.superState.foulSquares.get(target)).toBe('b');
-    // Timer must be 2 plies. With 1 ply (or the old "wipe on every tick"
-    // behaviour) the foul expired before the opponent ever played, which
-    // meant Foul Ground silently did nothing in real games.
-    expect(newState.superState.foulTurns.get(target)).toBe(2);
+    // 1 ply: Foul Ground is POST, so the setter's move-tick has already
+    // happened by the time it fires. Opp's tick clears it before our
+    // next turn. See SuperState type comment.
+    expect(newState.superState.foulTurns.get(target)).toBe(1);
   });
 
-  // Regression: the foul MUST survive the setter's tick (so it's active
-  // on the opponent's move) and clear on the opponent's tick.
-  it('persists through opponent\u2019s ply and clears after their tick', () => {
+  // Regression: the foul MUST be active during the opponent's move AND
+  // be gone before the setter's next turn (no leak). Since Foul Ground
+  // is POST, we don't simulate a setter's tick — the real flow has it
+  // already happened in commitMove.
+  it('is active for opponent\u2019s ply and cleared before setter\u2019s next turn', () => {
     const state = makeState();
     const target = sq('e4');
-    const after = CARD_EFFECTS['Foul Ground'](state, 'w', { square: target }).newState;
-    const afterSetterTick = { ...after, superState: tickSuperState(after.superState) };
-    expect(afterSetterTick.superState.foulSquares.get(target)).toBe('b');
-    expect(afterSetterTick.superState.foulTurns.get(target)).toBe(1);
-    const afterOppTick = { ...afterSetterTick, superState: tickSuperState(afterSetterTick.superState) };
+    const afterPlay = CARD_EFFECTS['Foul Ground'](state, 'w', { square: target }).newState;
+    expect(afterPlay.superState.foulSquares.get(target)).toBe('b');
+    expect(afterPlay.superState.foulTurns.get(target)).toBe(1);
+    const afterOppTick = { ...afterPlay, superState: tickSuperState(afterPlay.superState) };
     expect(afterOppTick.superState.foulSquares.has(target)).toBe(false);
     expect(afterOppTick.superState.foulTurns.has(target)).toBe(false);
   });

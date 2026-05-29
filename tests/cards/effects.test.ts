@@ -21,16 +21,17 @@ function makeState(fen = STARTING_FEN): SuperChessState {
 }
 
 describe('Freeze effect', () => {
-  it('adds target square to frozenSquares with a 2-ply timer', () => {
+  it('adds target square to frozenSquares with a 1-ply timer', () => {
     const state = makeState();
     const sq = algebraicToSquare('e7'); // black pawn
     const { newState } = CARD_EFFECTS['Freeze'](state, 'w', { oppPieceSquare: sq });
     expect(newState.superState.frozenSquares.has(sq)).toBe(true);
-    // 2, not 1 — timer ticks once on the SETTER's own ply, so a 1-ply
-    // freeze expires before the opponent ever sees it. The full
-    // "stays active on opponent's turn" regression lives in
-    // tests/cards/all-cards.test.ts.
-    expect(newState.superState.frozenSquares.get(sq)).toBe(2);
+    // 1, not 2 — Freeze is a POST card, so the setter's move-tick has
+    // already happened by the time this fires. The opponent's tick will
+    // then drop it from 1 → 0, so the freeze is gone by the start of our
+    // next turn (which is what playtesters expect). The full lifecycle
+    // regression lives in tests/cards/all-cards.test.ts.
+    expect(newState.superState.frozenSquares.get(sq)).toBe(1);
   });
 
   it('cannot freeze the king', () => {
@@ -48,7 +49,9 @@ describe('Shield effect', () => {
     const sq = algebraicToSquare('e2'); // white pawn
     const { newState } = CARD_EFFECTS['Shield'](state, 'w', { ownPieceSquare: sq });
     expect(newState.superState.shieldedSquares.has(sq)).toBe(true);
-    expect(newState.superState.shieldTurns.get(sq)).toBe(2);
+    // 1 ply: Shield is POST, so opp's tick drops it to 0 before our next
+    // turn starts. See SuperState type comment.
+    expect(newState.superState.shieldTurns.get(sq)).toBe(1);
   });
 });
 

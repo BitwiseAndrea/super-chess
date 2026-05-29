@@ -68,9 +68,6 @@ function mountGame(root: HTMLElement, cfg: NewGameConfig, loaded?: LoadedGame): 
   layout.pilotConfirmBtn.addEventListener('click', () => {
     controller.confirmPilotMove();
   });
-  layout.pilotSkipBtn.addEventListener('click', () => {
-    controller.disengagePilot('user clicked "take over" on proposal');
-  });
 
   layout.usePilotBtn.addEventListener('click', () => {
     showPilotPickerModal({
@@ -235,7 +232,6 @@ interface Layout {
   pilotProposalBanner: HTMLElement;
   pilotProposalText: HTMLElement;
   pilotConfirmBtn: HTMLButtonElement;
-  pilotSkipBtn: HTMLButtonElement;
 }
 
 function buildLayout(root: HTMLElement, cfg: NewGameConfig): Layout {
@@ -488,6 +484,48 @@ function buildLayout(root: HTMLElement, cfg: NewGameConfig): Layout {
 
   boardCol.appendChild(youStrip);
 
+  // Pilot proposal banner — only rendered while a pilot is engaged. Sits
+  // between the active-pilot chip in youStrip ("Italian Game (0/5) [stop]")
+  // and your hand below, so the engage → propose → confirm flow reads as
+  // a single visual cluster. Display toggles to 'flex' in
+  // updatePilotProposal when there's a suggestion to show.
+  //
+  // We intentionally do NOT reserve space when no pilot is engaged (most
+  // games, especially for casual users who never engage one) — reserving
+  // 50px+ of empty padding-block below the player's hand looks odd.
+  // While engaged-but-between-proposals (during the bot's turn), we keep
+  // the reserved space via `visibility: hidden` so the layout doesn't
+  // jump as proposals come and go.
+  const pilotProposalBanner = document.createElement('div');
+  pilotProposalBanner.style.cssText = `
+    display: none;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 14px;
+    margin: 4px 0 6px;
+    border-radius: 12px;
+    background: color-mix(in srgb, var(--sc-accent) 16%, var(--sc-panel));
+    border: 1.5px solid var(--sc-accent);
+    color: var(--sc-text);
+    font-family: system-ui, sans-serif;
+    font-size: 13px;
+    transition: opacity 180ms ease;
+    box-shadow:
+      0 0 0 3px color-mix(in srgb, var(--sc-accent) 14%, transparent),
+      inset 0 1px 0 color-mix(in srgb, var(--sc-accent) 28%, transparent);
+  `;
+  const pilotProposalText = document.createElement('div');
+  pilotProposalText.style.cssText = 'flex: 1; line-height: 1.4;';
+  const pilotConfirmBtn = document.createElement('button');
+  pilotConfirmBtn.type = 'button';
+  pilotConfirmBtn.className = 'sc-btn sc-btn--primary';
+  pilotConfirmBtn.style.padding = '8px 14px';
+  pilotConfirmBtn.style.fontSize = '13px';
+  pilotProposalBanner.appendChild(pilotProposalText);
+  pilotProposalBanner.appendChild(pilotConfirmBtn);
+
+  boardCol.appendChild(pilotProposalBanner);
+
   // Your hand at the bottom of the column.
   const youHand = document.createElement('div');
   boardCol.appendChild(youHand);
@@ -510,59 +548,6 @@ function buildLayout(root: HTMLElement, cfg: NewGameConfig): Layout {
     font-family: system-ui, sans-serif;
   `;
   boardCol.appendChild(banner);
-
-  // Pilot proposal banner \u2014 only rendered while a pilot is engaged. We
-  // intentionally do NOT reserve its space when no pilot is engaged (most
-  // games, especially for casual users who never engage one), since
-  // reserving 50px+ of empty padding-block below the player's hand looks
-  // weird. While engaged-but-between-proposals (during the bot's turn),
-  // we keep the reserved space via `visibility: hidden` so the layout
-  // doesn't bounce per turn. updatePilotProposal toggles all three modes.
-  //
-  // Positioning note: the banner sits DIRECTLY UNDER THE HEADER, not at
-  // the bottom of the board column. The user's mental model is "the
-  // 'use an opening' button engages a pilot, the pilot proposes here";
-  // putting these two elements far apart (header vs below-the-hand) made
-  // the suggestion easy to miss. They live next to each other now so
-  // the engage \u2192 propose \u2192 confirm flow reads top-to-bottom.
-  const pilotProposalBanner = document.createElement('div');
-  pilotProposalBanner.style.cssText = `
-    display: none;
-    align-items: center;
-    gap: 12px;
-    padding: 12px 16px;
-    border-radius: 12px;
-    background: color-mix(in srgb, var(--sc-accent) 16%, var(--sc-panel));
-    border: 1.5px solid var(--sc-accent);
-    color: var(--sc-text);
-    font-family: system-ui, sans-serif;
-    font-size: 13px;
-    transition: opacity 180ms ease;
-    box-shadow:
-      0 0 0 3px color-mix(in srgb, var(--sc-accent) 14%, transparent),
-      inset 0 1px 0 color-mix(in srgb, var(--sc-accent) 28%, transparent);
-  `;
-  const pilotProposalText = document.createElement('div');
-  pilotProposalText.style.cssText = 'flex: 1; line-height: 1.4;';
-  const pilotConfirmBtn = document.createElement('button');
-  pilotConfirmBtn.type = 'button';
-  pilotConfirmBtn.className = 'sc-btn sc-btn--primary';
-  pilotConfirmBtn.style.padding = '8px 14px';
-  pilotConfirmBtn.style.fontSize = '13px';
-  const pilotSkipBtn = document.createElement('button');
-  pilotSkipBtn.type = 'button';
-  pilotSkipBtn.className = 'sc-btn';
-  pilotSkipBtn.style.padding = '8px 14px';
-  pilotSkipBtn.style.fontSize = '13px';
-  pilotSkipBtn.textContent = 'I\u2019ll take it';
-  pilotProposalBanner.appendChild(pilotProposalText);
-  pilotProposalBanner.appendChild(pilotConfirmBtn);
-  pilotProposalBanner.appendChild(pilotSkipBtn);
-  // Insert right after the header, before the 2-column body. (The
-  // banner DOM was already created above, but appended into boardCol
-  // historically; moving it to `wrap` keeps it adjacent to the
-  // engage button.)
-  wrap.insertBefore(pilotProposalBanner, body);
 
   // Right: side panel \u2014 split into two stacked sub-panels (deck on top,
   // move log on bottom) so the player can see the deck composition AND
@@ -657,7 +642,7 @@ function buildLayout(root: HTMLElement, cfg: NewGameConfig): Layout {
     bugReportBtn,
     board, oppCaptured, youCaptured, oppLabel, youLabel,
     oppHand, youHand, log, deck, banner,
-    pilotProposalBanner, pilotProposalText, pilotConfirmBtn, pilotSkipBtn,
+    pilotProposalBanner, pilotProposalText, pilotConfirmBtn,
   };
 }
 

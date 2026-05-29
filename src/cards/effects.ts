@@ -87,11 +87,11 @@ export const CARD_EFFECTS: Record<string, CardEffectFn> = {
       return { newState: state, logEntry: 'Freeze: must target opponent piece', materialDelta: 0 };
     }
     const next = cloneSuperState(state);
-    // Turns counter in PLIES, not turns: 2 = "active during the opponent's
-    // next turn, expires at end of it". Setting 1 would tick down to 0 on
-    // the freezer's own tick and the opponent would never see it \u2014 that
-    // was the original Freeze bug.
-    next.superState.frozenSquares.set(sq, 2);
+    // POST card: fires AFTER the setter's move-tick. 1 ply means "active
+    // during exactly the opponent's upcoming ply, gone before our next
+    // turn starts". Setting 2 would leak the freeze into our next turn,
+    // which playtesters reported as confusing. See SuperState type comment.
+    next.superState.frozenSquares.set(sq, 1);
     return {
       newState: next,
       logEntry: `Freeze applied to ${p} at ${sqStr(sq)}`,
@@ -119,7 +119,9 @@ export const CARD_EFFECTS: Record<string, CardEffectFn> = {
     }
     const next = cloneSuperState(state);
     next.superState.shieldedSquares.set(sq, color);
-    next.superState.shieldTurns.set(sq, 2);
+    // POST card: 1 ply (gone before our next turn). See SuperState type
+    // comment for the pre/post timing distinction.
+    next.superState.shieldTurns.set(sq, 1);
     return {
       newState: next,
       logEntry: `Shield on ${p} at ${sqStr(sq)}`,
@@ -636,9 +638,9 @@ export const CARD_EFFECTS: Record<string, CardEffectFn> = {
     const opp: PieceColor = color === 'w' ? 'b' : 'w';
     const next = cloneSuperState(state);
     next.superState.foulSquares.set(sq, opp);
-    // 2 plies: survives setter's tick, active during opponent's turn,
-    // cleared at end of opponent's turn. See SuperState type comment.
-    next.superState.foulTurns.set(sq, 2);
+    // POST card: 1 ply (active during opponent's upcoming move, cleared
+    // before our next turn). See SuperState type comment.
+    next.superState.foulTurns.set(sq, 1);
     return {
       newState: next,
       logEntry: `Foul Ground: opponent cannot move to ${sqStr(sq)}`,

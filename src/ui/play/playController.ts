@@ -605,6 +605,16 @@ export class PlayController {
 
     const piece = this.state.chess.board[sq];
 
+    // Click the already-selected piece → deselect it. Cheap escape hatch
+    // when the user changes their mind without having to click an empty
+    // square. Pilot state is unaffected (it was already disengaged on
+    // the initial selection click).
+    if (piece && pieceColor(piece) === this.cfg.humanColor && this.selectedSquare === sq) {
+      this.selectedSquare = null;
+      this.emit();
+      return;
+    }
+
     // Click own piece → select it. This counts as "taking the wheel" from
     // the pilot — the user wants to play their own move now. Even an
     // unconsumed proposal counts as engaged (so we clear both).

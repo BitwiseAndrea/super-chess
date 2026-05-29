@@ -115,17 +115,30 @@ async function handleBugReport(request: Request, env: Env): Promise<Response> {
   const title = titleRaw.slice(0, MAX_TITLE_LEN);
   const description = clampDesc(descRaw, MAX_DESC_BYTES);
 
+  // Send the card payload in the REQUEST BODY, not the query string.
+  // The description can be ~14 KB once it includes the full BugReport
+  // JSON snapshot, and Trello's CDN bounces requests with URLs that
+  // long with a 414 before they ever hit the app. Auth + idList stay
+  // in query params (small, and easy to tell apart from card content
+  // when reading Worker logs); everything else goes in the body as
+  // application/x-www-form-urlencoded.
   const trelloUrl = new URL('https://api.trello.com/1/cards');
   trelloUrl.searchParams.set('idList', env.TRELLO_LIST_ID);
   trelloUrl.searchParams.set('key', env.TRELLO_API_KEY);
   trelloUrl.searchParams.set('token', env.TRELLO_API_TOKEN);
-  trelloUrl.searchParams.set('name', title);
-  trelloUrl.searchParams.set('desc', description);
-  trelloUrl.searchParams.set('pos', 'top');
+
+  const formBody = new URLSearchParams();
+  formBody.set('name', title);
+  formBody.set('desc', description);
+  formBody.set('pos', 'top');
 
   let trelloRes: Response;
   try {
-    trelloRes = await fetch(trelloUrl.toString(), { method: 'POST' });
+    trelloRes = await fetch(trelloUrl.toString(), {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: formBody.toString(),
+    });
   } catch (err) {
     return jsonResponse(
       { error: `network error contacting Trello: ${(err as Error).message}` },

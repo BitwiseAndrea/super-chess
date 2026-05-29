@@ -54,14 +54,14 @@ describe('Shield: shield follows the piece when it moves', () => {
   it('transferMovedPieceShield moves the shield from `from` to `to`', () => {
     const state = makeState();
     state.superState.shieldedSquares.set(sq('e2'), 'w');
-    state.superState.shieldTurns.set(sq('e2'), 2);
+    state.superState.shieldTurns.set(sq('e2'), 1);
 
     const move = moveOf(sq('e2'), sq('e4'), 'wP');
     const next = transferMovedPieceShield(state.superState, move);
 
     expect(next.shieldedSquares.has(sq('e2'))).toBe(false);
     expect(next.shieldedSquares.get(sq('e4'))).toBe('w');
-    expect(next.shieldTurns.get(sq('e4'))).toBe(2);
+    expect(next.shieldTurns.get(sq('e4'))).toBe(1);
   });
 
   it('also transfers the rook shield when the rook castles', () => {
@@ -159,6 +159,7 @@ describe('Freeze: cannot target the king or own pieces', () => {
     const state = makeState();
     const { newState } = CARD_EFFECTS.Freeze(state, 'w', { oppPieceSquare: sq('b8') });
     expect(newState).not.toBe(state);
-    expect(newState.superState.frozenSquares.get(sq('b8'))).toBe(2);
+    // 1 ply: POST card timing (see SuperState type comment).
+    expect(newState.superState.frozenSquares.get(sq('b8'))).toBe(1);
   });
 });

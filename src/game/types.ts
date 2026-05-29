@@ -4,12 +4,24 @@ import type { DeckState, CardInstance } from '../cards/types.ts';
 import type { CardRarity } from '../cards/types.ts';
 
 export interface SuperState {
-  // Turns counters are in PLIES (half-moves). Setting a counter to 2 means
-  // "survives the setter's tick (counter → 1, effect active during the
-  // OPPONENT's turn) and clears after the opponent's tick (counter → 0)".
-  // Setting to 1 means "expires at the end of the setter's CURRENT ply" —
-  // i.e. it dies before the opponent ever sees it. So 2 is the typical
-  // value for cards that say "for the opponent's next turn".
+  // Turns counters are in PLIES (half-moves). The right initial value depends
+  // on WHEN the card is played relative to the move-tick:
+  //
+  //  - PRE / instead cards (Disrupt, etc.) fire BEFORE the setter's chess
+  //    move, so the move's tick decrements the counter once before the
+  //    opponent ever sees it. For these, set the counter to 2 so:
+  //      setter applies (=2) → setter's tick (→1, opp turn active) →
+  //      opp's tick (→0, cleared).
+  //
+  //  - POST cards (Shield, Freeze, Foul Ground) fire AFTER the setter's
+  //    chess move, so the move-tick has ALREADY happened when the effect
+  //    is applied. For these, set the counter to 1 so:
+  //      setter applies (=1, after own tick) → opp's tick (→0, cleared).
+  //    Setting 2 here would leak the effect into the SETTER'S NEXT turn,
+  //    which is confusing and was a real playtester complaint.
+  //
+  // In both cases, the effect is "active during exactly the opponent's next
+  // ply" and is gone by the time the setter's next ply starts.
   frozenSquares: Map<Square, number>;        // sq → turns remaining
   shieldedSquares: Map<Square, PieceColor>;  // sq → color who shielded
   shieldTurns: Map<Square, number>;          // sq → turns remaining on shield
