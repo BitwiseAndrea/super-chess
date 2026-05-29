@@ -76,11 +76,22 @@ export function validateState(state: SuperChessState): ValidationResult {
       if (pieceColor(p) === 'w') wKings++;
       else bKings++;
     }
-    // Pawns must never be on the back ranks (they should have promoted).
+    // Pawns must never be on their PROMOTION rank \u2014 if they reached it
+    // they should have already been promoted to a Q/R/B/N. The promotion
+    // rank is color-specific:
+    //   \u2022 white pawns promote on row 0 (rank 8).
+    //   \u2022 black pawns promote on row 7 (rank 1).
+    //
+    // The OPPOSITE back rank (white's row 7, black's row 0) is the pawn's
+    // own home rank, NOT the promotion rank. Pawns can legitimately end
+    // up there via cards like Pawn Retreat (moves one square backward),
+    // so we mustn't flag those positions as errors.
     if (pieceType(p) === 'P') {
       const row = sq >> 3;
-      if (row === 0 || row === 7) {
-        push('error', 'board', `${p} on back rank — should have promoted`, sq);
+      const color = pieceColor(p);
+      const onPromotionRank = (color === 'w' && row === 0) || (color === 'b' && row === 7);
+      if (onPromotionRank) {
+        push('error', 'board', `${p} on back rank \u2014 should have promoted`, sq);
       }
     }
   }
@@ -312,8 +323,8 @@ export interface BugReport {
   superState: {
     frozen: Array<{ sq: string; turnsRemaining: number }>;
     shielded: Array<{ sq: string; color: PieceColor; turnsRemaining: number }>;
-    foul: Array<{ sq: string; forbiddenColor: PieceColor }>;
-    mustMoveType: Array<{ color: PieceColor; type: string }>;
+    foul: Array<{ sq: string; forbiddenColor: PieceColor; turnsRemaining: number }>;
+    mustMoveType: Array<{ color: PieceColor; type: string; turnsRemaining: number }>;
     knightsPathSquare: string | null;
     ghostStepSquare: string | null;
     fortifiedPawnSquare: string | null;
@@ -363,9 +374,11 @@ export function buildBugReport(
       sq: sqToAlg(sq), color, turnsRemaining: ss.shieldTurns.get(sq) ?? 0,
     })),
     foul: [...ss.foulSquares].map(([sq, forbiddenColor]) => ({
-      sq: sqToAlg(sq), forbiddenColor,
+      sq: sqToAlg(sq), forbiddenColor, turnsRemaining: ss.foulTurns.get(sq) ?? 0,
     })),
-    mustMoveType: [...ss.mustMoveType].map(([color, type]) => ({ color, type })),
+    mustMoveType: [...ss.mustMoveType].map(([color, type]) => ({
+      color, type, turnsRemaining: ss.mustMoveTurns.get(color) ?? 0,
+    })),
     knightsPathSquare: ss.knightsPathSquare !== null ? sqToAlg(ss.knightsPathSquare) : null,
     ghostStepSquare: ss.ghostStepSquare !== null ? sqToAlg(ss.ghostStepSquare) : null,
     fortifiedPawnSquare: ss.fortifiedPawnSquare !== null ? sqToAlg(ss.fortifiedPawnSquare) : null,

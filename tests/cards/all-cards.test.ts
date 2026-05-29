@@ -8,6 +8,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { CARD_EFFECTS } from '../../src/cards/effects.ts';
+import { tickSuperState } from '../../src/game/rules.ts';
 import { CARD_DEFINITIONS, buildDeck } from '../../src/cards/definitions.ts';
 import { parseFEN, STARTING_FEN } from '../../src/engine/fen.ts';
 import { createSuperState } from '../../src/game/types.ts';
@@ -41,9 +42,9 @@ function pawnCount(state: SuperChessState, color: PieceColor): number {
 // ─── definitions metadata ──────────────────────────────────────────────────
 
 describe('CARD_DEFINITIONS', () => {
-  it('defines exactly 20 unique cards', () => {
+  it('defines exactly 22 unique cards (20 original + Pawn Retreat + Sidestep)', () => {
     const names = new Set(CARD_DEFINITIONS.map((c) => c.name));
-    expect(names.size).toBe(20);
+    expect(names.size).toBe(22);
   });
 
   it('every definition has an effect implementation', () => {
@@ -88,11 +89,14 @@ describe("Knight's Path", () => {
 });
 
 describe('Freeze', () => {
-  it('freezes an opponent piece for 1 turn', () => {
+  it('freezes an opponent piece with a 2-ply timer (survives setter\u2019s tick, expires after opponent\u2019s tick)', () => {
     const state = makeState();
     const target = sq('e7'); // black pawn
     const { newState } = CARD_EFFECTS.Freeze(state, 'w', { oppPieceSquare: target });
-    expect(newState.superState.frozenSquares.get(target)).toBe(1);
+    // 2 plies, not 1 — see SuperState type comment. With timer=1 the
+    // effect was being ticked off on the FREEZER's own tick and the
+    // opponent never saw it (the original bug).
+    expect(newState.superState.frozenSquares.get(target)).toBe(2);
   });
 
   it('refuses to freeze the king', () => {
@@ -100,6 +104,23 @@ describe('Freeze', () => {
     const { newState, logEntry } = CARD_EFFECTS.Freeze(state, 'w', { oppPieceSquare: sq('e8') });
     expect(newState).toBe(state);
     expect(logEntry).toMatch(/king/i);
+  });
+
+  // Regression for the "Freeze never reaches opponent" bug. We mimic the
+  // real game flow: setter ticks once after their own ply, then the
+  // opponent has a turn (which ticks at the end). After the full cycle
+  // the freeze MUST have been active for exactly one of the opponent's
+  // plies, and must NOT be present once they've ticked through it.
+  it('stays active through opponent\u2019s ply and is cleared by the second tick', () => {
+    const state = makeState();
+    const target = sq('e7');
+    const after = CARD_EFFECTS.Freeze(state, 'w', { oppPieceSquare: target }).newState;
+    // Setter's tick (end of white's move):
+    const afterSetterTick = { ...after, superState: tickSuperState(after.superState) };
+    expect(afterSetterTick.superState.frozenSquares.get(target)).toBe(1);
+    // Opponent's tick (end of black's move):
+    const afterOppTick = { ...afterSetterTick, superState: tickSuperState(afterSetterTick.superState) };
+    expect(afterOppTick.superState.frozenSquares.has(target)).toBe(false);
   });
 });
 
@@ -125,6 +146,16 @@ describe('Extra Move', () => {
     const state = makeState();
     const { newState } = CARD_EFFECTS['Extra Move'](state, 'b', {});
     expect(newState.superState.extraMoveRemaining).toBe('b');
+  });
+
+  // Regression: tickSuperState used to clobber extraMoveRemaining = null on
+  // every turn-end, which silently neutralised the card. The flag must
+  // survive a tick so the bonus-move handler downstream can read it.
+  it('preserves extraMoveRemaining through tickSuperState', () => {
+    const state = makeState();
+    const { newState } = CARD_EFFECTS['Extra Move'](state, 'w', {});
+    const ticked = tickSuperState(newState.superState);
+    expect(ticked.extraMoveRemaining).toBe('w');
   });
 });
 
@@ -219,6 +250,24 @@ describe('Teleport', () => {
     expect(newState.superState.shieldedSquares.has(sq('h1'))).toBe(false);
     expect(newState.superState.shieldedSquares.get(sq('h5'))).toBe('w');
     expect(newState.superState.shieldTurns.get(sq('h5'))).toBe(2);
+  });
+
+  it('rejects teleporting a pawn to its promotion rank', () => {
+    // Regression: this used to leave a wP on a8 (back rank) without
+    // promoting it, which broke validateState. Caught by the
+    // full-game-validation fuzz once maxHandSize \u2265 3 surfaced more
+    // card plays.
+    const state = makeState('4k3/P7/8/8/8/8/8/4K3 w - - 0 1');
+    const { newState, logEntry } = CARD_EFFECTS.Teleport(state, 'w', { ownPieceSquare: sq('a7'), square: sq('a8') });
+    expect(newState).toBe(state);
+    expect(logEntry).toMatch(/promotion/i);
+  });
+
+  it('rejects teleporting a black pawn to its promotion rank (row 7)', () => {
+    const state = makeState('4k3/8/8/8/8/8/p7/4K3 b - - 0 1');
+    const { newState, logEntry } = CARD_EFFECTS.Teleport(state, 'b', { ownPieceSquare: sq('a2'), square: sq('a1') });
+    expect(newState).toBe(state);
+    expect(logEntry).toMatch(/promotion/i);
   });
 });
 
@@ -376,6 +425,54 @@ describe('Swap', () => {
     expect(newState).toBe(state);
     expect(logEntry).toMatch(/own/i);
   });
+
+  // Regression: shield ownership used to be re-set to the caller after a
+  // swap, which would silently overwrite who owned the shield. We now
+  // preserve the actual stored owner from the map.
+  it('preserves shield owner + remaining turns through a swap', () => {
+    const state = makeState();
+    // Place a shield on d1 (white queen) owned by white with 2 turns left.
+    state.superState.shieldedSquares.set(sq('d1'), 'w');
+    state.superState.shieldTurns.set(sq('d1'), 2);
+
+    const { newState } = CARD_EFFECTS.Swap(state, 'w', {
+      ownPieceSquare: sq('d1'),
+      secondOwnPieceSquare: sq('a1'),
+    });
+
+    // The shield should now be on a1 (the destination of the d1 piece),
+    // still owned by 'w', still 2 turns left.
+    expect(newState.superState.shieldedSquares.get(sq('a1'))).toBe('w');
+    expect(newState.superState.shieldTurns.get(sq('a1'))).toBe(2);
+    expect(newState.superState.shieldedSquares.get(sq('d1'))).toBeUndefined();
+  });
+
+  it('rejects a swap that would land a pawn on its promotion rank', () => {
+    // Regression: Swap used to silently leave a pawn on the back rank
+    // without promoting it (breaks validateState). Caught by the
+    // full-game-validation fuzz once maxHandSize \u2265 3.
+    // Setup: white knight on a8 + white pawn on a7. Swapping them
+    // would put the pawn on a8 \u2014 a no-promotion back-rank pawn.
+    const state = makeState('N3k3/P7/8/8/8/8/8/4K3 w - - 0 1');
+    const { newState, logEntry } = CARD_EFFECTS.Swap(state, 'w', {
+      ownPieceSquare: sq('a7'),
+      secondOwnPieceSquare: sq('a8'),
+    });
+    expect(newState).toBe(state);
+    expect(logEntry).toMatch(/promotion/i);
+  });
+
+  it('rejects a swap symmetrically for black pawns', () => {
+    // Black knight on a1 + black pawn on a2. Swapping would put the
+    // black pawn on a1 \u2014 black's promotion rank.
+    const state = makeState('4k3/8/8/8/8/8/p7/n3K3 b - - 0 1');
+    const { newState, logEntry } = CARD_EFFECTS.Swap(state, 'b', {
+      ownPieceSquare: sq('a2'),
+      secondOwnPieceSquare: sq('a1'),
+    });
+    expect(newState).toBe(state);
+    expect(logEntry).toMatch(/promotion/i);
+  });
 });
 
 describe('Fortify', () => {
@@ -524,20 +621,216 @@ describe('Retreat', () => {
   });
 });
 
+describe('Pawn Retreat', () => {
+  it('moves a pawn 1 square straight backward to an empty square', () => {
+    // White pawn on e4 retreats to e3 (no other pieces in the way).
+    const state = makeState('4k3/8/8/8/4P3/8/8/4K3 w - - 0 1');
+    const { newState } = CARD_EFFECTS['Pawn Retreat'](state, 'w', { ownPieceSquare: sq('e4'), square: sq('e3') });
+    expect(newState.chess.board[sq('e4')]).toBeNull();
+    expect(newState.chess.board[sq('e3')]).toBe('wP');
+  });
+
+  it('moves a pawn 1 square diagonally backward to an empty square', () => {
+    // White pawn on e4 retreats diagonally to d3 \u2014 must be empty.
+    const state = makeState('4k3/8/8/8/4P3/8/8/4K3 w - - 0 1');
+    const { newState } = CARD_EFFECTS['Pawn Retreat'](state, 'w', { ownPieceSquare: sq('e4'), square: sq('d3') });
+    expect(newState.chess.board[sq('e4')]).toBeNull();
+    expect(newState.chess.board[sq('d3')]).toBe('wP');
+  });
+
+  it('moves a pawn diagonally backward on the other diagonal too', () => {
+    const state = makeState('4k3/8/8/8/4P3/8/8/4K3 w - - 0 1');
+    const { newState } = CARD_EFFECTS['Pawn Retreat'](state, 'w', { ownPieceSquare: sq('e4'), square: sq('f3') });
+    expect(newState.chess.board[sq('e4')]).toBeNull();
+    expect(newState.chess.board[sq('f3')]).toBe('wP');
+  });
+
+  it('rejects a 2-square retreat', () => {
+    const state = makeState('4k3/8/8/8/4P3/8/8/4K3 w - - 0 1');
+    const { newState, logEntry } = CARD_EFFECTS['Pawn Retreat'](state, 'w', { ownPieceSquare: sq('e4'), square: sq('e2') });
+    expect(newState).toBe(state);
+    expect(logEntry).toMatch(/one square/i);
+  });
+
+  it('rejects a 2-square diagonal retreat', () => {
+    // 2-square diagonal (knight\u2019s-move-shaped) is not a valid 1-step retreat.
+    const state = makeState('4k3/8/8/8/4P3/8/8/4K3 w - - 0 1');
+    const { newState, logEntry } = CARD_EFFECTS['Pawn Retreat'](state, 'w', { ownPieceSquare: sq('e4'), square: sq('c2') });
+    expect(newState).toBe(state);
+    expect(logEntry).toMatch(/one square|straight or one square diagonal/i);
+  });
+
+  it('rejects a sideways move (must change rank)', () => {
+    // Same rank, adjacent file \u2014 not backward at all.
+    const state = makeState('4k3/8/8/8/4P3/8/8/4K3 w - - 0 1');
+    const { newState, logEntry } = CARD_EFFECTS['Pawn Retreat'](state, 'w', { ownPieceSquare: sq('e4'), square: sq('d4') });
+    expect(newState).toBe(state);
+    expect(logEntry).toMatch(/one square backward/i);
+  });
+
+  it('rejects a forward move (must be backward)', () => {
+    const state = makeState('4k3/8/8/8/4P3/8/8/4K3 w - - 0 1');
+    const { newState, logEntry } = CARD_EFFECTS['Pawn Retreat'](state, 'w', { ownPieceSquare: sq('e4'), square: sq('e5') });
+    expect(newState).toBe(state);
+    expect(logEntry).toMatch(/one square backward/i);
+  });
+
+  it('rejects retreat onto an occupied square (no capture, even diagonally)', () => {
+    // Black knight on d3 blocks the diagonal retreat. Must be empty.
+    const state = makeState('4k3/8/8/8/4P3/3n4/8/4K3 w - - 0 1');
+    const { newState, logEntry } = CARD_EFFECTS['Pawn Retreat'](state, 'w', { ownPieceSquare: sq('e4'), square: sq('d3') });
+    expect(newState).toBe(state);
+    expect(logEntry).toMatch(/empty/i);
+  });
+
+  it('rejects retreat onto an occupied square (straight)', () => {
+    const state = makeState('4k3/8/8/8/4P3/4P3/8/4K3 w - - 0 1');
+    const { newState, logEntry } = CARD_EFFECTS['Pawn Retreat'](state, 'w', { ownPieceSquare: sq('e4'), square: sq('e3') });
+    expect(newState).toBe(state);
+    expect(logEntry).toMatch(/empty/i);
+  });
+
+  it('rejects targeting a non-pawn', () => {
+    const state = makeState('4k3/8/8/8/4N3/8/8/4K3 w - - 0 1');
+    const { newState, logEntry } = CARD_EFFECTS['Pawn Retreat'](state, 'w', { ownPieceSquare: sq('e4'), square: sq('e3') });
+    expect(newState).toBe(state);
+    expect(logEntry).toMatch(/pawn/i);
+  });
+
+  it('rejects a retreat that would leave the king in check', () => {
+    // White pawn on d2 blocks a check from a black bishop on h6.
+    // Retreating it (straight or diagonal) exposes the king. We use
+    // d2 \u2192 d1 to keep the test focused on the king-in-check guard.
+    const state = makeState('4k3/8/7b/8/8/8/3P4/2K5 w - - 0 1');
+    const { newState, logEntry } = CARD_EFFECTS['Pawn Retreat'](state, 'w', { ownPieceSquare: sq('d2'), square: sq('d1') });
+    expect(newState).toBe(state);
+    expect(logEntry).toMatch(/check/i);
+  });
+
+  it('works symmetrically for black (backward = toward rank 8)', () => {
+    const state = makeState('4k3/8/8/8/4p3/8/8/4K3 b - - 0 1');
+    const { newState } = CARD_EFFECTS['Pawn Retreat'](state, 'b', { ownPieceSquare: sq('e4'), square: sq('e5') });
+    expect(newState.chess.board[sq('e4')]).toBeNull();
+    expect(newState.chess.board[sq('e5')]).toBe('bP');
+  });
+
+  it('works diagonally for black too', () => {
+    const state = makeState('4k3/8/8/8/4p3/8/8/4K3 b - - 0 1');
+    const { newState } = CARD_EFFECTS['Pawn Retreat'](state, 'b', { ownPieceSquare: sq('e4'), square: sq('f5') });
+    expect(newState.chess.board[sq('e4')]).toBeNull();
+    expect(newState.chess.board[sq('f5')]).toBe('bP');
+  });
+});
+
+describe('Sidestep', () => {
+  it('moves a pawn 1 square diagonally forward to an empty square', () => {
+    const state = makeState('4k3/8/8/8/4P3/8/8/4K3 w - - 0 1');
+    const { newState } = CARD_EFFECTS.Sidestep(state, 'w', { ownPieceSquare: sq('e4'), square: sq('d5') });
+    expect(newState.chess.board[sq('e4')]).toBeNull();
+    expect(newState.chess.board[sq('d5')]).toBe('wP');
+  });
+
+  it('rejects diagonal backward (must be forward)', () => {
+    const state = makeState('4k3/8/8/8/4P3/8/8/4K3 w - - 0 1');
+    const { newState, logEntry } = CARD_EFFECTS.Sidestep(state, 'w', { ownPieceSquare: sq('e4'), square: sq('d3') });
+    expect(newState).toBe(state);
+    expect(logEntry).toMatch(/forward/i);
+  });
+
+  it('rejects straight-forward (not diagonal)', () => {
+    const state = makeState('4k3/8/8/8/4P3/8/8/4K3 w - - 0 1');
+    const { newState, logEntry } = CARD_EFFECTS.Sidestep(state, 'w', { ownPieceSquare: sq('e4'), square: sq('e5') });
+    expect(newState).toBe(state);
+    expect(logEntry).toMatch(/diagonal/i);
+  });
+
+  it('rejects a capture (destination must be empty)', () => {
+    // White pawn on e4, black knight on d5. Sidestep is non-capturing.
+    const state = makeState('4k3/8/8/3n4/4P3/8/8/4K3 w - - 0 1');
+    const { newState, logEntry } = CARD_EFFECTS.Sidestep(state, 'w', { ownPieceSquare: sq('e4'), square: sq('d5') });
+    expect(newState).toBe(state);
+    expect(logEntry).toMatch(/empty/i);
+  });
+
+  it('auto-promotes when landing on the promotion rank', () => {
+    // White pawn on e7 sidesteps to d8 \u2014 lands on promotion rank.
+    const state = makeState('4k3/4P3/8/8/8/8/8/4K3 w - - 0 1');
+    const { newState, logEntry } = CARD_EFFECTS.Sidestep(state, 'w', { ownPieceSquare: sq('e7'), square: sq('d8') });
+    expect(newState.chess.board[sq('d8')]).toBe('wQ');
+    expect(logEntry).toMatch(/promoted/i);
+  });
+
+  it('rejects a sidestep that would leave the king in check', () => {
+    // h6-c1 diagonal: h6, g5, f4, e3, d2, c1. Pawn on d2 blocks the
+    // bishop's attack on white king at c1. Sidestepping d2 -> c3 (or
+    // e3) clears the block and exposes the king.
+    const state = makeState('4k3/8/7b/8/8/8/3P4/2K5 w - - 0 1');
+    const { newState, logEntry } = CARD_EFFECTS.Sidestep(state, 'w', { ownPieceSquare: sq('d2'), square: sq('c3') });
+    expect(newState).toBe(state);
+    expect(logEntry).toMatch(/check/i);
+  });
+
+  it('rejects targeting a non-pawn', () => {
+    const state = makeState('4k3/8/8/8/4N3/8/8/4K3 w - - 0 1');
+    const { newState, logEntry } = CARD_EFFECTS.Sidestep(state, 'w', { ownPieceSquare: sq('e4'), square: sq('d5') });
+    expect(newState).toBe(state);
+    expect(logEntry).toMatch(/pawn/i);
+  });
+
+  it('works symmetrically for black (forward = toward rank 1)', () => {
+    const state = makeState('4k3/8/8/8/4p3/8/8/4K3 b - - 0 1');
+    const { newState } = CARD_EFFECTS.Sidestep(state, 'b', { ownPieceSquare: sq('e4'), square: sq('d3') });
+    expect(newState.chess.board[sq('e4')]).toBeNull();
+    expect(newState.chess.board[sq('d3')]).toBe('bP');
+  });
+});
+
 describe('Foul Ground', () => {
-  it('marks a square as fouled for the opponent', () => {
+  it('marks a square as fouled for the opponent with a 2-ply timer', () => {
     const state = makeState();
     const target = sq('e4');
     const { newState } = CARD_EFFECTS['Foul Ground'](state, 'w', { square: target });
     expect(newState.superState.foulSquares.get(target)).toBe('b');
+    // Timer must be 2 plies. With 1 ply (or the old "wipe on every tick"
+    // behaviour) the foul expired before the opponent ever played, which
+    // meant Foul Ground silently did nothing in real games.
+    expect(newState.superState.foulTurns.get(target)).toBe(2);
+  });
+
+  // Regression: the foul MUST survive the setter's tick (so it's active
+  // on the opponent's move) and clear on the opponent's tick.
+  it('persists through opponent\u2019s ply and clears after their tick', () => {
+    const state = makeState();
+    const target = sq('e4');
+    const after = CARD_EFFECTS['Foul Ground'](state, 'w', { square: target }).newState;
+    const afterSetterTick = { ...after, superState: tickSuperState(after.superState) };
+    expect(afterSetterTick.superState.foulSquares.get(target)).toBe('b');
+    expect(afterSetterTick.superState.foulTurns.get(target)).toBe(1);
+    const afterOppTick = { ...afterSetterTick, superState: tickSuperState(afterSetterTick.superState) };
+    expect(afterOppTick.superState.foulSquares.has(target)).toBe(false);
+    expect(afterOppTick.superState.foulTurns.has(target)).toBe(false);
   });
 });
 
 describe('Disrupt', () => {
-  it('forces the opponent to move a specific piece type next turn', () => {
+  it('forces the opponent to move a specific piece type next turn (2-ply timer)', () => {
     const state = makeState();
     const { newState } = CARD_EFFECTS.Disrupt(state, 'w', { pieceType: 'N' });
     expect(newState.superState.mustMoveType.get('b')).toBe('N');
+    expect(newState.superState.mustMoveTurns.get('b')).toBe(2);
+  });
+
+  // Regression: Disrupt was being wiped on the setter's tick, so the
+  // opponent was never actually constrained.
+  it('persists through opponent\u2019s ply and clears after their tick', () => {
+    const state = makeState();
+    const after = CARD_EFFECTS.Disrupt(state, 'w', { pieceType: 'N' }).newState;
+    const afterSetterTick = { ...after, superState: tickSuperState(after.superState) };
+    expect(afterSetterTick.superState.mustMoveType.get('b')).toBe('N');
+    expect(afterSetterTick.superState.mustMoveTurns.get('b')).toBe(1);
+    const afterOppTick = { ...afterSetterTick, superState: tickSuperState(afterSetterTick.superState) };
+    expect(afterOppTick.superState.mustMoveType.has('b')).toBe(false);
+    expect(afterOppTick.superState.mustMoveTurns.has('b')).toBe(false);
   });
 
   it('refuses if no piece type is provided', () => {
@@ -556,18 +849,52 @@ describe('Mirror', () => {
     expect(logEntry).toMatch(/no last move/i);
   });
 
+  // Regression: the old implementation tried to read the moving piece from
+  // `state.chess.board[lastMove.from]`, falling back to `opp + lastMove.color[1]`
+  // when that square was empty. But `lastMove.color` is 'w' or 'b', so [1] is
+  // `undefined`, producing literal strings like "bundefined". Now Mirror reads
+  // the piece directly from lastMove.movingPiece.
+  it('reads movingPiece from lastMove, not the (possibly vacated) from-square', () => {
+    const state = makeState();
+    // Black moved a knight from b8 → c6, then on a later turn captured with
+    // it (so b8 stays empty AND c6 may now hold something else). The old
+    // code path would mis-identify the piece here.
+    state.superState.lastMove = {
+      movingPiece: 'bN',
+      from: sq('b8'),
+      to: sq('c6'),
+      capture: null, promotion: null, isCastle: false,
+      enPassantCaptureSq: null, newEnPassantSq: null,
+      algebraic: 'Nc6', color: 'b', turnNumber: 1,
+    } as never;
+    // Now wipe both squares so the old "board[lastMove.from]" lookup returns
+    // null and the broken fallback would have fired.
+    state.chess.board[sq('b8')] = null;
+    state.chess.board[sq('c6')] = null;
+
+    const { newState, logEntry } = CARD_EFFECTS.Mirror(state, 'w', {});
+
+    // A white knight should have moved (Mirror finds a same-typed reply).
+    expect(newState).not.toBe(state);
+    expect(logEntry).toMatch(/^Mirror: wN /); // not "bundefined" or similar
+    const knightsStillHome = [sq('b1'), sq('g1')]
+      .filter((s) => newState.chess.board[s] === 'wN').length;
+    expect(knightsStillHome).toBeLessThan(2);
+  });
+
   it('replays the opponent\u2019s last move using a same-typed piece of the player', () => {
     // Set up a state with both sides having knights symmetric.
     // Opponent (black) last moved Nb8-c6.
     const state = makeState();
     state.superState.lastMove = {
+      movingPiece: 'bN',
       from: sq('b8'),
       to: sq('c6'),
-      piece: 'bN',
       capture: null,
       promotion: null,
-      isCastle: null,
+      isCastle: false,
       enPassantCaptureSq: null,
+      newEnPassantSq: null,
       algebraic: 'Nc6',
       color: 'b',
       turnNumber: 1,
@@ -626,33 +953,111 @@ describe('Time Warp', () => {
     expect(logEntry).toMatch(/history/i);
   });
 
-  it('restores the board to two plies ago and marks the card used', () => {
+  // Card text: "Restore the board to the state before YOUR last chess move
+  // and your opponent's response." That means we land at the start of MY
+  // previous turn (chess.turn === me), where I get a do-over.
+  it('rewinds to the start of the player\u2019s previous turn', () => {
     const state = makeState();
-    // Fake two prior snapshots.
+
+    // Snapshot 1: start of my (white\u2019s) previous turn — white to move,
+    // initial position.
+    const snap1Board = [...state.chess.board];
     state.snapshots.push({
-      chess: { ...state.chess, board: [...state.chess.board] },
+      chess: { ...state.chess, board: snap1Board, turn: 'w' },
       superState: { ...state.superState },
+      deckState: state.deck,
     } as never);
+
+    // White plays e2-e4. Snapshot 2 is captured at the top of black\u2019s turn.
     state.chess.board[sq('e2')] = null;
     state.chess.board[sq('e4')] = 'wP';
+    const snap2Board = [...state.chess.board];
     state.snapshots.push({
-      chess: { ...state.chess, board: [...state.chess.board] },
+      chess: { ...state.chess, board: snap2Board, turn: 'b' },
       superState: { ...state.superState },
+      deckState: state.deck,
     } as never);
-    // Black moves c7-c5.
+
+    // Black plays c7-c5. Snapshot 3 is captured at the top of white\u2019s next
+    // turn (the turn during which Time Warp is played).
     state.chess.board[sq('c7')] = null;
     state.chess.board[sq('c5')] = 'bP';
+    state.chess.turn = 'w';
     state.snapshots.push({
-      chess: { ...state.chess, board: [...state.chess.board] },
+      chess: { ...state.chess, board: [...state.chess.board], turn: 'w' },
       superState: { ...state.superState },
+      deckState: state.deck,
     } as never);
 
     const { newState } = CARD_EFFECTS['Time Warp'](state, 'w', {});
-    // Two plies back: e-pawn moved but black hadn't yet responded.
-    expect(newState.chess.board[sq('e4')]).toBe('wP');
-    expect(newState.chess.board[sq('c5')]).toBeNull();
+
+    // Land at snapshot 1: initial position, white to move.
+    expect(newState.chess.turn).toBe('w');
+    expect(newState.chess.board[sq('e2')]).toBe('wP');
+    expect(newState.chess.board[sq('e4')]).toBeNull();
     expect(newState.chess.board[sq('c7')]).toBe('bP');
+    expect(newState.chess.board[sq('c5')]).toBeNull();
     expect(newState.superState.timeWarpUsed.get('w')).toBe(true);
+  });
+
+  it('refuses when there is not enough history (fewer than 3 snapshots)', () => {
+    const state = makeState();
+    state.snapshots.push({
+      chess: { ...state.chess, board: [...state.chess.board], turn: 'w' },
+      superState: { ...state.superState },
+      deckState: state.deck,
+    } as never);
+    state.snapshots.push({
+      chess: { ...state.chess, board: [...state.chess.board], turn: 'b' },
+      superState: { ...state.superState },
+      deckState: state.deck,
+    } as never);
+    const { newState, logEntry } = CARD_EFFECTS['Time Warp'](state, 'w', {});
+    expect(newState).toBe(state);
+    expect(logEntry).toMatch(/not enough history/i);
+  });
+
+  it('refuses if the rewound snapshot doesn\u2019t actually belong to the caller', () => {
+    // 3 snapshots but none of them has turn === 'w' at the 3-back position.
+    const state = makeState();
+    for (const turn of ['b', 'w', 'b'] as const) {
+      state.snapshots.push({
+        chess: { ...state.chess, board: [...state.chess.board], turn },
+        superState: { ...state.superState },
+        deckState: state.deck,
+      } as never);
+    }
+    const { newState, logEntry } = CARD_EFFECTS['Time Warp'](state, 'w', {});
+    expect(newState).toBe(state);
+    expect(logEntry).toMatch(/misaligned/i);
+  });
+
+  it('restores the deck state (hands, draw pile) from the snapshot', () => {
+    const state = makeState();
+    // Snapshot 1: my-previous-turn, with a "future-different" deck state.
+    const pastDeck: typeof state.deck = {
+      drawPile: [],
+      discardPile: [],
+      hand: { white: [], black: [] },
+    };
+    state.snapshots.push({
+      chess: { ...state.chess, board: [...state.chess.board], turn: 'w' },
+      superState: { ...state.superState },
+      deckState: pastDeck,
+    } as never);
+    state.snapshots.push({
+      chess: { ...state.chess, board: [...state.chess.board], turn: 'b' },
+      superState: { ...state.superState },
+      deckState: state.deck,
+    } as never);
+    state.snapshots.push({
+      chess: { ...state.chess, board: [...state.chess.board], turn: 'w' },
+      superState: { ...state.superState },
+      deckState: state.deck,
+    } as never);
+
+    const { newState } = CARD_EFFECTS['Time Warp'](state, 'w', {});
+    expect(newState.deck).toBe(pastDeck);
   });
 
   it('refuses a second use by the same color', () => {
@@ -681,6 +1086,17 @@ describe('consumesTurn flag', () => {
   it('is set on Mirror', () => {
     const def = CARD_DEFINITIONS.find((c) => c.name === 'Mirror')!;
     expect(def.consumesTurn).toBe(true);
+  });
+
+  it('is set on the pawn-only movement cards (Double Step, Pawn Retreat, Sidestep)', () => {
+    // These three cards ARE the player's chess move \u2014 they reposition a
+    // pawn and that's it. Marking them consumesTurn keeps the
+    // play-then-move flow from awarding the player a free chess move
+    // after using the card.
+    for (const name of ['Double Step', 'Pawn Retreat', 'Sidestep']) {
+      const def = CARD_DEFINITIONS.find((c) => c.name === name)!;
+      expect(def.consumesTurn, `${name} should consume the turn`).toBe(true);
+    }
   });
 
   it('is NOT set on cards that allow a normal move afterwards', () => {
@@ -754,6 +1170,78 @@ describe('integration: card draw attribution after Trade swap (regression for "y
       }
     }
   }, 30000);
+});
+
+describe('integration: SuperChessGame fires Extra Move bonus', () => {
+  it('white plays Extra Move, then makes TWO chess moves before turn passes', async () => {
+    const { SuperChessGame } = await import('../../src/game/superChess.ts');
+    type CardAI = import('../../src/ai/types.ts').CardAI;
+    type ChessAI = import('../../src/ai/types.ts').ChessAI;
+
+    // White always plays Extra Move if available; black never plays anything.
+    const bonusAI: CardAI = {
+      name: 'bonus',
+      async decide(_s, _c, hand) {
+        const card = hand.find((h) => h.definition.name === 'Extra Move');
+        if (card) return { shouldPlay: true, card, target: {} };
+        return { shouldPlay: false };
+      },
+    };
+    const passAI: CardAI = { name: 'pass', async decide() { return { shouldPlay: false }; } };
+    const firstLegalAI: ChessAI = {
+      name: 'first-legal',
+      async selectMove(state, color) {
+        const { getSuperChessLegalMoves } = await import('../../src/game/rules.ts');
+        return getSuperChessLegalMoves(state, color)[0];
+      },
+    };
+
+    const game = new SuperChessGame({
+      games: 1,
+      maxMovesPerGame: 4,
+      chessAI: { white: firstLegalAI, black: firstLegalAI },
+      cardAI: { white: bonusAI, black: passAI },
+      searchDepth: 1,
+      speedMs: 0,
+      seed: 7,
+      // Flood the deck with Extra Move so white draws it (after capture etc).
+      // But white needs a CAPTURE to draw a card — easier: stuff white's
+      // opening hand via cardConfig that puts lots of Extra Move cards into
+      // the deck, plus a Trade or two so white has SOMETHING in hand turn 1.
+      // Simpler approach: give white the card directly by mutating state
+      // before driving the iterator.
+      cardConfig: [{ name: 'Extra Move', copies: 60 }],
+    });
+
+    // Hand-deal Extra Move to white BEFORE the first turn.
+    const s = game.getState();
+    s.deck.hand.white.push({
+      id: 'em-test', definition: CARD_DEFINITIONS.find((d) => d.name === 'Extra Move')!,
+    });
+    // Also sync the internal Deck instance.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (game as any).deck.hands.white.push(s.deck.hand.white[0]);
+
+    const iter = game.playGame();
+    await iter.next(); // white's turn
+
+    const state = game.getState();
+    // After white's full turn (card + 2 chess moves), it's black's turn.
+    expect(state.chess.turn).toBe('b');
+    // White should have made exactly TWO chess-move history events this turn.
+    const whiteMoves = state.history.filter(
+      (e) => e.type === 'move' && (e as any).data.color === 'w',
+    );
+    expect(whiteMoves.length).toBe(2);
+    // Plus one cardPlay (Extra Move).
+    const cardPlays = state.history.filter((e) => e.type === 'cardPlay');
+    expect(cardPlays.length).toBe(1);
+    expect((cardPlays[0] as any).data.cardName).toBe('Extra Move');
+    // The bonus move must be a non-capture (per card rules).
+    expect((whiteMoves[1].data as { capture: unknown }).capture).toBeNull();
+    // extraMoveRemaining must have been cleared.
+    expect(state.superState.extraMoveRemaining).toBeNull();
+  });
 });
 
 describe('integration: SuperChessGame respects consumesTurn (the user-reported bug)', () => {

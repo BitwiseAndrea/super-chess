@@ -1,0 +1,16 @@
+# .dev.vars — read by `wrangler dev` / `pnpm cf:dev` for local Worker dev.
+# Copy this to `.dev.vars` (gitignored) and fill in your own values to
+# test the /api/bug-report → Trello flow against a real board.
+#
+#   1. Visit https://trello.com/app-key to grab your personal API KEY.
+#   2. On the same page, click the "Token" link and authorise. Copy the TOKEN.
+#   3. Find a list ID: run `pnpm trello:lists` (after setting the two
+#      env vars above), or look at the URL when you "Share" a list in
+#      Trello. List IDs look like 24-hex-char strings.
+#
+# For production, do NOT use .dev.vars — use `wrangler secret put …`
+# instead so the values are encrypted at rest in Cloudflare.
+
+TRELLO_API_KEY="your-personal-key"
+TRELLO_API_TOKEN="your-personal-token"
+TRELLO_LIST_ID="64f0…the-list-id…0000"

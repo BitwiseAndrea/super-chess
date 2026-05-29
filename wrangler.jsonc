@@ -3,16 +3,41 @@
   "name": "super-chess",
   "compatibility_date": "2026-05-26",
 
+  // Worker entry. Handles /api/* routes (currently just /api/bug-report
+  // → Trello) and falls through to env.ASSETS.fetch for everything else
+  // so the SPA in ./dist is served exactly like a static-only Worker.
+  "main": "src/worker/index.ts",
+
   // Run `vite build` before deploy so `npx wrangler deploy` is a one-liner.
   "build": {
     "command": "pnpm exec vite build"
   },
 
-  // Static-only Worker: the bundled Vite app in ./dist is served directly,
-  // SPA fallback to /index.html for unknown paths.
+  // Static SPA: bundled Vite app in ./dist. The `assets.binding` makes
+  // `env.ASSETS.fetch(request)` available from the Worker entry; SPA
+  // fallback to /index.html is handled by `not_found_handling`.
   "assets": {
     "directory": "./dist",
+    "binding": "ASSETS",
     "not_found_handling": "single-page-application"
+  },
+
+  // Per-IP rate limit on /api/bug-report. Keys are the cf-connecting-ip
+  // header. The rate-limit binding only supports period: 10 or 60, so
+  // we cap at 3 reports / minute / IP — plenty for legitimate use, and
+  // a determined attacker still bottoms out at 180/hour which is well
+  // inside Trello's per-token quota. The Worker treats this binding as
+  // optional at runtime, so if it's ever unbound we just skip the check
+  // (see src/worker/index.ts).
+  "unsafe": {
+    "bindings": [
+      {
+        "name": "BUG_REPORT_LIMIT",
+        "type": "ratelimit",
+        "namespace_id": "1001",
+        "simple": { "limit": 3, "period": 60 }
+      }
+    ]
   },
 
   "observability": {

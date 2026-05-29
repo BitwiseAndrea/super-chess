@@ -46,6 +46,7 @@ export function alphaBeta(
   timeLimitMs: number | undefined,
   nodesRef: { count: number },
   ctx?: CardEvalContext,
+  shieldedSquares?: ReadonlySet<Square>,
 ): number {
   nodesRef.count++;
 
@@ -55,9 +56,9 @@ export function alphaBeta(
     }
   }
 
-  if (depth === 0) return quiescence(state, alpha, beta, maximizing, frozenSquares, nodesRef, ctx);
+  if (depth === 0) return quiescence(state, alpha, beta, maximizing, frozenSquares, nodesRef, ctx, shieldedSquares);
 
-  const moves = generateLegal(state, frozenSquares);
+  const moves = filterShieldedCaptures(generateLegal(state, frozenSquares), shieldedSquares);
 
   if (moves.length === 0) {
     if (isInCheck(state)) {
@@ -72,7 +73,7 @@ export function alphaBeta(
     let best = -Infinity;
     for (const move of moves) {
       const saved = applyMoveInPlace(state, move);
-      const score = alphaBeta(state, depth - 1, alpha, beta, false, frozenSquares, startTime, timeLimitMs, nodesRef, ctx);
+      const score = alphaBeta(state, depth - 1, alpha, beta, false, frozenSquares, startTime, timeLimitMs, nodesRef, ctx, shieldedSquares);
       undoMove(state, move, saved);
       if (score > best) best = score;
       if (score > alpha) alpha = score;
@@ -83,7 +84,7 @@ export function alphaBeta(
     let best = Infinity;
     for (const move of moves) {
       const saved = applyMoveInPlace(state, move);
-      const score = alphaBeta(state, depth - 1, alpha, beta, true, frozenSquares, startTime, timeLimitMs, nodesRef, ctx);
+      const score = alphaBeta(state, depth - 1, alpha, beta, true, frozenSquares, startTime, timeLimitMs, nodesRef, ctx, shieldedSquares);
       undoMove(state, move, saved);
       if (score < best) best = score;
       if (score < beta) beta = score;
@@ -101,6 +102,7 @@ function quiescence(
   frozenSquares: Set<Square>,
   nodesRef: { count: number },
   ctx?: CardEvalContext,
+  shieldedSquares?: ReadonlySet<Square>,
 ): number {
   nodesRef.count++;
   const standPat = evaluate(state, ctx);
@@ -108,11 +110,14 @@ function quiescence(
   if (maximizing) {
     if (standPat >= beta) return beta;
     if (standPat > alpha) alpha = standPat;
-    const moves = generateLegal(state, frozenSquares).filter(m => m.capture !== null || m.promotion !== null);
+    const moves = filterShieldedCaptures(
+      generateLegal(state, frozenSquares).filter(m => m.capture !== null || m.promotion !== null),
+      shieldedSquares,
+    );
     sortMoves(moves);
     for (const move of moves) {
       const saved = applyMoveInPlace(state, move);
-      const score = quiescence(state, alpha, beta, false, frozenSquares, nodesRef, ctx);
+      const score = quiescence(state, alpha, beta, false, frozenSquares, nodesRef, ctx, shieldedSquares);
       undoMove(state, move, saved);
       if (score > alpha) alpha = score;
       if (alpha >= beta) break;
@@ -121,11 +126,14 @@ function quiescence(
   } else {
     if (standPat <= alpha) return alpha;
     if (standPat < beta) beta = standPat;
-    const moves = generateLegal(state, frozenSquares).filter(m => m.capture !== null || m.promotion !== null);
+    const moves = filterShieldedCaptures(
+      generateLegal(state, frozenSquares).filter(m => m.capture !== null || m.promotion !== null),
+      shieldedSquares,
+    );
     sortMoves(moves);
     for (const move of moves) {
       const saved = applyMoveInPlace(state, move);
-      const score = quiescence(state, alpha, beta, true, frozenSquares, nodesRef, ctx);
+      const score = quiescence(state, alpha, beta, true, frozenSquares, nodesRef, ctx, shieldedSquares);
       undoMove(state, move, saved);
       if (score < beta) beta = score;
       if (alpha >= beta) break;
@@ -139,9 +147,10 @@ export function search(
   config: SearchConfig,
   frozenSquares?: Set<Square>,
   ctx?: CardEvalContext,
+  shieldedSquares?: ReadonlySet<Square>,
 ): SearchResult {
   const frozen = frozenSquares ?? new Set<Square>();
-  const moves = generateLegal(state, frozen);
+  const moves = filterShieldedCaptures(generateLegal(state, frozen), shieldedSquares);
 
   if (moves.length === 0) {
     return { bestMove: null, score: 0, nodesVisited: 0, depthReached: 0 };
@@ -162,7 +171,7 @@ export function search(
       state, config.depth - 1,
       -Infinity, Infinity,
       !maximizing,
-      frozen, startTime, config.timeLimitMs, nodesRef, ctx,
+      frozen, startTime, config.timeLimitMs, nodesRef, ctx, shieldedSquares,
     );
     undoMove(state, move, saved);
 
@@ -178,4 +187,20 @@ export function search(
     nodesVisited: nodesRef.count,
     depthReached: config.depth,
   };
+}
+
+/** Drop moves that would capture a shielded piece. The Shield card sets
+ * `shieldedSquares` on a destination square; ANY capture of that square is
+ * illegal until the shield ticks off. We treat the filter as a no-op when
+ * the caller doesn't pass shielded data (legacy callers / tests).
+ *
+ * Note: own-color shielded captures aren't possible in standard chess
+ * anyway (no friendly fire), so we don't need a per-color owner check at
+ * this layer \u2014 the move-list already excludes friendly captures. */
+function filterShieldedCaptures(
+  moves: Move[],
+  shieldedSquares: ReadonlySet<Square> | undefined,
+): Move[] {
+  if (!shieldedSquares || shieldedSquares.size === 0) return moves;
+  return moves.filter((m) => m.capture === null || !shieldedSquares.has(m.to));
 }

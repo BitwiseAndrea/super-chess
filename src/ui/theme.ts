@@ -23,6 +23,8 @@ export interface ThemePalette {
   legalRing: string;
   cardTarget: string;
   cardTargetRing: string;
+  pilotSuggestion: string;
+  pilotSuggestionRing: string;
   lastMoveFrom: string;
   lastMoveTo: string;
   checkSquare: string;
@@ -74,6 +76,10 @@ const DARK_THEME: ThemePalette = {
   legalRing: 'rgba(78, 159, 78, 0.85)',
   cardTarget: 'rgba(180, 100, 220, 0.35)',
   cardTargetRing: 'rgba(180, 100, 220, 0.9)',
+  // Pilot proposal tint — amber accent, distinct from the gold lastMove tint
+  // (more saturated) and from the purple card-target tint.
+  pilotSuggestion: 'rgba(244, 199, 90, 0.32)',
+  pilotSuggestionRing: 'rgba(244, 199, 90, 0.95)',
   lastMoveFrom: 'rgba(244, 199, 90, 0.5)',
   lastMoveTo: 'rgba(244, 199, 90, 0.75)',
   checkSquare: 'rgba(220, 80, 80, 0.45)',
@@ -123,6 +129,9 @@ const LIGHT_THEME: ThemePalette = {
   legalRing: 'rgba(50, 130, 50, 0.9)',
   cardTarget: 'rgba(150, 70, 200, 0.35)',
   cardTargetRing: 'rgba(150, 70, 200, 0.95)',
+  // Pilot proposal tint — warm amber that reads on cream squares.
+  pilotSuggestion: 'rgba(184, 132, 29, 0.30)',
+  pilotSuggestionRing: 'rgba(184, 132, 29, 0.95)',
   lastMoveFrom: 'rgba(218, 165, 32, 0.55)',
   lastMoveTo: 'rgba(218, 165, 32, 0.75)',
   checkSquare: 'rgba(200, 60, 60, 0.45)',

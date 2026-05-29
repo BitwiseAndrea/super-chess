@@ -3,9 +3,10 @@
 import type { PieceColor, Move } from '../engine/types.ts';
 import type { SuperChessState, GameResult, CardPlayRecord, TurnResult, GameEvent } from './types.ts';
 import { createSuperState } from './types.ts';
-import { tickSuperState, clearMovedPieceShield } from './rules.ts';
+import { tickSuperState, transferMovedPieceShield } from './rules.ts';
 import type { ChessAI, CardAI } from '../ai/types.ts';
-import type { SimulationConfig } from '../simulation/types.ts';
+import type { SimulationConfig, DrawRules } from '../simulation/types.ts';
+import { DEFAULT_DRAW_RULES } from '../simulation/types.ts';
 import { Deck } from '../cards/deck.ts';
 import { buildDeck } from '../cards/definitions.ts';
 import { CARD_EFFECTS } from '../cards/effects.ts';
@@ -35,14 +36,15 @@ export class SuperChessGame {
   private chessAI: { white: ChessAI; black: ChessAI };
   private cardAI: { white: CardAI; black: CardAI };
   private maxMoves: number;
-  private slowGameThreshold = 6; // turns without capture before drawing a card
   private positionCounts = new Map<string, number>(); // position key → occurrence count
-  private whiteFirstDrawSkipped = false; // white skips their first capture card draw (balances first-move advantage)
+  private drawRules: DrawRules;
+  private whiteFirstDrawSkipped = false; // white skips their first capture card draw — only applies when drawRules.whiteFirstDrawSkip is true
 
   constructor(config: SimulationConfig) {
     this.chessAI = config.chessAI as { white: ChessAI; black: ChessAI };
     this.cardAI = config.cardAI as { white: CardAI; black: CardAI };
     this.maxMoves = config.maxMovesPerGame;
+    this.drawRules = config.drawRules ?? DEFAULT_DRAW_RULES;
 
     const definitions = buildDeck(config.cardConfig ?? []);
     this.deck = new Deck(definitions);
@@ -59,6 +61,27 @@ export class SuperChessGame {
       result: null,
       snapshots: [],
     };
+
+    // Deal starting hands per drawRules. We log each starting card as
+    // a `cardDraw` history entry (reason: 'startingHand') so analytics
+    // and replay can tell starting cards apart from earned ones.
+    this.dealStartingHand('w', this.drawRules.startingHand.white);
+    this.dealStartingHand('b', this.drawRules.startingHand.black);
+    this.state.deck = this.deck.getState();
+  }
+
+  private dealStartingHand(color: PieceColor, count: number): void {
+    const max = this.deck.maxHandSize;
+    const n = Math.min(count, max);
+    for (let i = 0; i < n; i++) {
+      const drawn = this.deck.draw(color);
+      if (!drawn) break;
+      this.state.history.push({
+        type: 'cardDraw',
+        data: { color, card: drawn, reason: 'startingHand' },
+        turn: 1,
+      });
+    }
   }
 
   // Full async generator — yields state after each turn
@@ -101,6 +124,21 @@ export class SuperChessGame {
 
   private isThreefoldRepetition(): boolean {
     return (this.positionCounts.get(positionKey(this.state.chess)) ?? 0) >= 3;
+  }
+
+  /** After a Time Warp restores chess state, the positionCounts map is no
+   * longer in sync (it still reflects the futures we just undid). Rebuild
+   * it from the truncated history. */
+  private rebuildPositionCounts(): void {
+    this.positionCounts.clear();
+    for (const ev of this.state.history) {
+      if (ev.type === 'move' && ev.boardAfter) {
+        const key = positionKey(ev.boardAfter);
+        this.positionCounts.set(key, (this.positionCounts.get(key) ?? 0) + 1);
+      }
+    }
+    // The current position (post-Time Warp) also counts.
+    this.recordPosition();
   }
 
   private async playTurn(): Promise<TurnResult> {
@@ -171,6 +209,14 @@ export class SuperChessGame {
             // clock to keep 50-move detection sensible.
             consumeTurnPawnOrCapture = true;
           }
+
+          // Time Warp restored chess + superState + deck in-place. We need
+          // to re-sync the game-class state that lives outside SuperChessState:
+          // the Deck instance and the positionCounts map.
+          if (isTimeWarp && stateChanged) {
+            this.deck = Deck.fromState(this.state.deck);
+            this.rebuildPositionCounts();
+          }
         }
       }
     }
@@ -214,8 +260,11 @@ export class SuperChessGame {
       this.state.superState.capturedByColor.get(color)!.push(validMove.capture);
     }
 
-    // Clear shield from moved piece
-    let newSuperState = clearMovedPieceShield(this.state.superState, validMove.from);
+    // Transfer shield from moved piece (follows the piece to its new
+    // square — playtester reported "shield breaks if you move the
+    // shielded piece" as a bug, which is what the old clear-on-move
+    // semantics did).
+    let newSuperState = transferMovedPieceShield(this.state.superState, validMove);
 
     // Update turn count
     newSuperState = {
@@ -236,58 +285,69 @@ export class SuperChessGame {
 
     this.state.history.push({ type: 'move', data: annotated, turn: newChess.fullMoveNumber, boardAfter: { ...newChess, board: [...newChess.board] } });
     this.recordPosition();
+
+    // ─── Extra Move bonus ──────────────────────────────────────────────────
+    // Card description: "After your normal move you may make one additional
+    // non-capture move. Cards cannot be played during the second move."
+    //
+    // applyMove already flipped turn → opponent. To run the bonus correctly
+    // (legal-move generation + AI selection both depend on chess.turn) we
+    // un-flip it and rewind fullMoveNumber, then play the second move which
+    // will flip them forward again.
     if (newSuperState.extraMoveRemaining === color) {
-      const extraMoves = getSuperChessLegalMoves(this.state, color);
-      const nonCaptures = extraMoves.filter((m) => m.capture === null);
+      const rewoundChess = {
+        ...this.state.chess,
+        turn: color,
+        fullMoveNumber: color === 'b' ? this.state.chess.fullMoveNumber - 1 : this.state.chess.fullMoveNumber,
+      };
+      this.state = {
+        ...this.state,
+        chess: rewoundChess,
+        superState: { ...this.state.superState, extraMoveRemaining: null },
+      };
+      const nonCaptures = getSuperChessLegalMoves(this.state, color).filter((m) => m.capture === null);
       if (nonCaptures.length > 0) {
         const extraMove = await chessAI.selectMove(this.state, color);
         const validExtra = nonCaptures.find(
-          (m) => m.from === extraMove.from && m.to === extraMove.to,
+          (m) => m.from === extraMove.from && m.to === extraMove.to && m.promotion === extraMove.promotion,
         ) ?? nonCaptures[0];
         const extraAlgebraic = toAlgebraic(this.state.chess, validExtra);
         const extraAnnotated = this.annotate(validExtra, extraAlgebraic, color);
         const extraChess = applyMove(this.state.chess, validExtra);
-        this.state = {
-          ...this.state,
-          chess: extraChess,
-          superState: { ...this.state.superState, extraMoveRemaining: null },
-        };
+        this.state = { ...this.state, chess: extraChess };
         this.state.history.push({ type: 'move', data: extraAnnotated, turn: extraChess.fullMoveNumber, boardAfter: { ...extraChess, board: [...extraChess.board] } });
         this.recordPosition();
+      } else {
+        // No non-capture available — forfeit the bonus. Re-flip the turn so
+        // play continues with the opponent (and bump fullMoveNumber if we
+        // un-bumped it above).
+        this.state = {
+          ...this.state,
+          chess: {
+            ...this.state.chess,
+            turn: color === 'w' ? 'b' : 'w',
+            fullMoveNumber: color === 'b' ? this.state.chess.fullMoveNumber + 1 : this.state.chess.fullMoveNumber,
+          },
+        };
       }
     }
 
     // --- Card draw triggers ---
+    // Only captures grant cards. White skips their very first capture-triggered
+    // draw to offset the first-move advantage. (The old slow-game rule that
+    // gifted a card every N quiet plies has been retired — see git history.)
     let cardDrawn: ReturnType<typeof this.deck.draw> = null;
-    // White skips their very first capture-triggered card draw to offset first-move advantage
-    const skipThisDraw = color === 'w' && !this.whiteFirstDrawSkipped && captureHappened;
+    const skipThisDraw =
+      this.drawRules.whiteFirstDrawSkip &&
+      color === 'w' &&
+      !this.whiteFirstDrawSkipped &&
+      captureHappened;
     if (skipThisDraw) {
       this.whiteFirstDrawSkipped = true;
     } else if (captureHappened && this.deck.handSize(color) < this.deck.maxHandSize) {
       cardDrawn = this.deck.draw(color);
       if (cardDrawn) {
         this.state.history.push({ type: 'cardDraw', data: { color, card: cardDrawn, reason: 'capture' }, turn: this.state.chess.fullMoveNumber });
-      }
-    } else if (newSuperState.turnsSinceCapture > 0 &&
-               newSuperState.turnsSinceCapture % this.slowGameThreshold === 0) {
-      if (this.deck.handSize(color) < this.deck.maxHandSize) {
-        // Hand has room — just draw
-        cardDrawn = this.deck.draw(color);
-        if (cardDrawn) {
-          this.state.history.push({ type: 'cardDraw', data: { color, card: cardDrawn, reason: 'slowGame' }, turn: this.state.chess.fullMoveNumber });
-        }
-      } else {
-        // Hand is full — discard oldest card and draw a fresh one
-        const hand = this.deck.getHand(color);
-        if (hand.length > 0) {
-          const discarded = hand[0];
-          this.deck.discard(color, discarded);
-          this.state.history.push({ type: 'cardDiscard', data: { color, card: discarded }, turn: this.state.chess.fullMoveNumber });
-          cardDrawn = this.deck.draw(color);
-          if (cardDrawn) {
-            this.state.history.push({ type: 'cardDraw', data: { color, card: cardDrawn, reason: 'slowGame' }, turn: this.state.chess.fullMoveNumber });
-          }
-        }
       }
     }
     this.state.deck = this.deck.getState();
@@ -310,8 +370,9 @@ export class SuperChessGame {
       superState: this.state.superState,
       deckState: this.deck.getState(),
     });
-    // Keep only last 4 snapshots (2 full turns)
-    if (this.state.snapshots.length > 4) {
+    // Keep enough snapshots for Time Warp (needs 3 to rewind to player's
+    // previous turn) plus headroom for back-to-back uses by both players.
+    if (this.state.snapshots.length > 8) {
       this.state.snapshots.shift();
     }
   }

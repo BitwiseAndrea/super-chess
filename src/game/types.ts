@@ -4,11 +4,19 @@ import type { DeckState, CardInstance } from '../cards/types.ts';
 import type { CardRarity } from '../cards/types.ts';
 
 export interface SuperState {
+  // Turns counters are in PLIES (half-moves). Setting a counter to 2 means
+  // "survives the setter's tick (counter → 1, effect active during the
+  // OPPONENT's turn) and clears after the opponent's tick (counter → 0)".
+  // Setting to 1 means "expires at the end of the setter's CURRENT ply" —
+  // i.e. it dies before the opponent ever sees it. So 2 is the typical
+  // value for cards that say "for the opponent's next turn".
   frozenSquares: Map<Square, number>;        // sq → turns remaining
   shieldedSquares: Map<Square, PieceColor>;  // sq → color who shielded
   shieldTurns: Map<Square, number>;          // sq → turns remaining on shield
   foulSquares: Map<Square, PieceColor>;      // sq → color FORBIDDEN from entering
+  foulTurns: Map<Square, number>;            // sq → turns remaining on foul
   mustMoveType: Map<PieceColor, PieceType>;  // color → must move this type next turn
+  mustMoveTurns: Map<PieceColor, number>;    // color → turns remaining on must-move constraint
   capturedByColor: Map<PieceColor, PieceStr[]>;
   lastMove: AnnotatedMove | null;
   turnsSinceCapture: number;
@@ -28,7 +36,9 @@ export function createSuperState(): SuperState {
     shieldedSquares: new Map(),
     shieldTurns: new Map(),
     foulSquares: new Map(),
+    foulTurns: new Map(),
     mustMoveType: new Map(),
+    mustMoveTurns: new Map(),
     capturedByColor: new Map([['w', []], ['b', []]]),
     lastMove: null,
     turnsSinceCapture: 0,
@@ -68,7 +78,7 @@ export interface CardPlayRecord {
 
 export type GameEvent =
   | { type: 'move'; data: AnnotatedMove; turn: number; boardAfter?: ChessState }
-  | { type: 'cardDraw'; data: { color: PieceColor; card: CardInstance; reason: 'capture' | 'slowGame' }; turn: number }
+  | { type: 'cardDraw'; data: { color: PieceColor; card: CardInstance; reason: 'capture' | 'startingHand' }; turn: number }
   | { type: 'cardPlay'; data: CardPlayRecord; turn: number }
   | { type: 'cardDiscard'; data: { color: PieceColor; card: CardInstance }; turn: number }
   | { type: 'gameOver'; data: GameResult; turn: number };

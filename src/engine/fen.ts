@@ -36,7 +36,13 @@ export function parseFEN(fen: string): ChessState {
     }
   }
 
-  const turn = parts[1] === 'b' ? 'b' : 'w';
+  // Reject malformed turn tokens loudly rather than silently defaulting to 'w'.
+  // (The old `parts[1] === 'b' ? 'b' : 'w'` was a guess that hid bugs in
+  // callers that pass garbage instead of a real FEN.)
+  if (parts[1] !== 'w' && parts[1] !== 'b') {
+    throw new Error(`FEN: invalid turn token '${parts[1]}' (expected 'w' or 'b')`);
+  }
+  const turn = parts[1];
 
   const cr = parts[2];
   const castlingRights = {
@@ -71,7 +77,14 @@ export function toFEN(state: ChessState): string {
         empty++;
       } else {
         if (empty > 0) { fen += empty; empty = 0; }
-        fen += PIECE_FEN_MAP[p] ?? '?';
+        const ch = PIECE_FEN_MAP[p];
+        if (ch === undefined) {
+          // A FEN containing '?' is meaningless to any other chess tool. If
+          // we have a piece string we don't recognise, it's a bug — fail
+          // loudly instead of producing garbage output.
+          throw new Error(`toFEN: unknown piece string '${p}' on square ${r * 8 + c}`);
+        }
+        fen += ch;
       }
     }
     if (empty > 0) fen += empty;

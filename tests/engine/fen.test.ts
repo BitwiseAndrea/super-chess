@@ -51,3 +51,25 @@ describe('FEN serialization', () => {
     expect(toFEN(parseFEN(fen))).toBe(fen);
   });
 });
+
+describe('FEN error handling (no silent fallbacks)', () => {
+  it('throws on a malformed turn token', () => {
+    // Old behavior: garbage like "x" silently became 'w'. New behavior:
+    // throw so callers don't ship a corrupt game state.
+    expect(() => parseFEN('rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR x KQkq - 0 1'))
+      .toThrow(/invalid turn token/i);
+  });
+
+  it('throws on an unknown piece char', () => {
+    expect(() => parseFEN('xnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'))
+      .toThrow(/unknown piece/i);
+  });
+
+  it('toFEN throws on an unknown piece string in the board', () => {
+    const s = parseFEN(STARTING_FEN);
+    // Deliberately corrupt the board.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (s.board as any)[0] = 'wZ';
+    expect(() => toFEN(s)).toThrow(/unknown piece string/i);
+  });
+});

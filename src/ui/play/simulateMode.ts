@@ -7,6 +7,7 @@ import { CardHandsRenderer } from '../cardHands.ts';
 import { GameLogRenderer } from '../gameLog.ts';
 import { StatsDashboard } from '../statsDashboard.ts';
 import { ControlsPanel } from '../controls.ts';
+import { DeckPanelRenderer } from './deckPanel.ts';
 import { MinimaxAI } from '../../ai/minimaxAI.ts';
 import { HeuristicCardAI } from '../../ai/heuristicCardAI.ts';
 import { SimulationRunner } from '../../simulation/runner.ts';
@@ -27,66 +28,98 @@ export function renderSimulateMode(root: HTMLElement): void {
     margin: 0 auto;
     padding: 18px 20px 32px;
     color: ${THEME.textPrimary};
+    display: flex; flex-direction: column;
+    gap: 18px;
   `;
   root.appendChild(wrap);
 
-  const header = document.createElement('div');
-  header.style.cssText = 'margin-bottom: 14px;';
-  const eyebrow = document.createElement('div');
-  eyebrow.style.cssText = `
-    font-size: 11px; letter-spacing: 0.32em; text-transform: uppercase;
-    color: ${THEME.textMuted}; margin-bottom: 6px;
+  // Header \u2014 mirrors Play's header (turn-indicator pill on the left, action
+  // buttons on the right) so the two modes feel like siblings. Where Play
+  // shows "your move", Simulate shows a fixed "bots playing" eyebrow pill.
+  const header = document.createElement('header');
+  header.style.cssText = 'display: flex; align-items: center; gap: 14px; flex-wrap: wrap;';
+  wrap.appendChild(header);
+
+  const modePill = document.createElement('div');
+  modePill.style.cssText = `
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 14px;
+    background: ${THEME.panel};
+    border: 1px solid ${THEME.border};
+    border-radius: 999px;
+    font-size: 13px;
+    letter-spacing: 0.04em;
+    color: ${THEME.textPrimary};
   `;
-  eyebrow.textContent = 'simulate';
-  header.appendChild(eyebrow);
-  const title = document.createElement('h1');
-  title.style.cssText = 'font-size: 30px; font-weight: 400; margin: 0 0 6px;';
-  title.textContent = 'card balance simulator';
-  header.appendChild(title);
+  modePill.innerHTML = `<span style="width:8px;height:8px;border-radius:50%;background:${THEME.accent};display:inline-block;"></span><span>bot vs bot \u00b7 research</span>`;
+  header.appendChild(modePill);
+
+  const tagline = document.createElement('div');
+  tagline.style.cssText = `
+    font-size: 11px; letter-spacing: 0.24em; text-transform: uppercase;
+    color: ${THEME.textMuted};
+  `;
+  tagline.textContent = 'card balance simulator';
+  header.appendChild(tagline);
+
+  const headerSpacer = document.createElement('div');
+  headerSpacer.style.flex = '1';
+  header.appendChild(headerSpacer);
+
   const lede = document.createElement('p');
   lede.style.cssText = `
     margin: 0;
     color: ${THEME.textSecondary};
-    font-size: 13.5px;
+    font-size: 13px;
     font-family: system-ui, sans-serif;
-    max-width: 720px;
+    max-width: 100%;
   `;
   lede.textContent = 'Pit two bots against each other for N games. Per-card win-rate, play-rate, and utilization roll up in the dashboard. Export CSV/JSON for analysis.';
-  header.appendChild(lede);
-  wrap.appendChild(header);
+  wrap.appendChild(lede);
 
+  // Layout grid \u2014 board on the left, narrow center column (hands + deck
+  // composition + move log stacked), stats on the right. The "deck" panel
+  // is new and matches the one in Play \u2014 a consistent way to see the
+  // pool of cards in play.
   const grid = document.createElement('div');
   grid.style.cssText = `
     display: grid;
     grid-template-areas:
       "board hands stats"
+      "board deck  stats"
       "board log   stats"
       "ctrl  ctrl  ctrl";
     grid-template-columns: minmax(360px, 480px) 280px 1fr;
-    grid-template-rows: auto 1fr auto;
+    grid-template-rows: auto auto 1fr auto;
     gap: 12px;
   `;
   wrap.appendChild(grid);
 
-  const make = (area: string) => {
+  const make = (area: string, opts: { padded?: boolean } = {}) => {
     const d = document.createElement('div');
     d.style.gridArea = area;
     d.style.background = THEME.panel;
     d.style.border = `1px solid ${THEME.border}`;
     d.style.borderRadius = '12px';
-    d.style.padding = '12px';
+    if (opts.padded !== false) d.style.padding = '12px';
     d.style.minWidth = '0';
     grid.appendChild(d);
     return d;
   };
   const boardC = make('board');
   const handsC = make('hands');
+  // Deck panel renders its own border/padding via DeckPanelRenderer; we
+  // give it an unstyled host so the panel's chrome owns the visuals.
+  const deckC  = document.createElement('div');
+  deckC.style.cssText = 'grid-area: deck; min-width: 0;';
+  grid.appendChild(deckC);
   const logC   = make('log');
   const statsC = make('stats');
   const ctrlC  = make('ctrl');
 
   const boardR = new BoardRenderer(boardC);
   const handsR = new CardHandsRenderer(handsC);
+  const deckR  = new DeckPanelRenderer(deckC);
   const logR   = new GameLogRenderer(logC);
   const statsR = new StatsDashboard(statsC);
   const ctrl   = new ControlsPanel(ctrlC);
@@ -123,6 +156,7 @@ export function renderSimulateMode(root: HTMLElement): void {
       if (last) {
         boardR.render(last);
         handsR.render(last);
+        deckR.render(last);
         logR.render(last);
       }
     }
@@ -153,6 +187,7 @@ export function renderSimulateMode(root: HTMLElement): void {
   };
   boardR.render(initialState);
   handsR.render(initialState);
+  deckR.render(initialState);
   logR.render(initialState);
   const empty: AggregatedStats = {
     totalGames: 0, whiteWins: 0, blackWins: 0, draws: 0,

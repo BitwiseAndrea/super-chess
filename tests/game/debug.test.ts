@@ -74,6 +74,35 @@ describe('validateState', () => {
       expect(issue!.square).toBe('a8');
     });
 
+    it('rejects a black pawn on rank 1 (its promotion rank)', () => {
+      const state = makeState();
+      state.chess.board[sq('h1')] = 'bP';
+      const result = validateState(state);
+      expect(result.ok).toBe(false);
+      const issue = result.errors.find((e) => /should have promoted/.test(e.message));
+      expect(issue).toBeDefined();
+      expect(issue!.square).toBe('h1');
+    });
+
+    it('ALLOWS a black pawn on rank 8 (its home rank \u2014 reachable via Pawn Retreat)', () => {
+      // Regression: the validator used to flag this as "should have
+      // promoted" because it treated rank 1 and rank 8 symmetrically
+      // for both colors. Black pawns only promote on rank 1.
+      const state = makeState();
+      state.chess.board[sq('c7')] = null;
+      state.chess.board[sq('c8')] = 'bP'; // retreated from c7
+      const result = validateState(state);
+      expect(result.errors.find((e) => /should have promoted/.test(e.message))).toBeUndefined();
+    });
+
+    it('ALLOWS a white pawn on rank 1 (its home rank \u2014 reachable via Pawn Retreat)', () => {
+      const state = makeState();
+      state.chess.board[sq('c2')] = null;
+      state.chess.board[sq('c1')] = 'wP'; // retreated from c2
+      const result = validateState(state);
+      expect(result.errors.find((e) => /should have promoted/.test(e.message))).toBeUndefined();
+    });
+
     it('rejects invalid piece strings', () => {
       const state = makeState();
       (state.chess.board as Array<string | null>)[sq('e4')] = 'xX';
@@ -199,13 +228,14 @@ describe('buildBugReport', () => {
     state.superState.shieldedSquares.set(sq('e2'), 'w');
     state.superState.shieldTurns.set(sq('e2'), 2);
     state.superState.foulSquares.set(sq('d5'), 'b');
+    state.superState.foulTurns.set(sq('d5'), 2);
     const report = buildBugReport(state, { config: {} });
     expect(report.superState.frozen).toEqual([{ sq: 'e4', turnsRemaining: 3 }]);
     expect(report.superState.shielded).toEqual([
       { sq: 'e2', color: 'w', turnsRemaining: 2 },
     ]);
     expect(report.superState.foul).toEqual([
-      { sq: 'd5', forbiddenColor: 'b' },
+      { sq: 'd5', forbiddenColor: 'b', turnsRemaining: 2 },
     ]);
   });
 
@@ -215,7 +245,7 @@ describe('buildBugReport', () => {
       state.history.push({
         type: 'move',
         turn: i,
-        data: { from: 0, to: 0, capture: null, promotion: null, enPassantCaptureSq: null, newEnPassantSq: null, isCastle: false, algebraic: `e${i}`, turnNumber: i, color: 'w' },
+        data: { movingPiece: 'wP', from: 0, to: 0, capture: null, promotion: null, enPassantCaptureSq: null, newEnPassantSq: null, isCastle: false, algebraic: `e${i}`, turnNumber: i, color: 'w' },
       } as any);
     }
     const report = buildBugReport(state, { config: {} });

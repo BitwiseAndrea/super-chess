@@ -1,13 +1,23 @@
 // src/cards/effects.ts
 // One exported function per card. All effects take a SuperChessState and return a new state + log.
 import type { PieceColor, Square, PieceStr, PieceType } from '../engine/types.ts';
-import type { SuperChessState, CardTarget } from '../game/types.ts';
+import type { SuperChessState, CardTarget, SuperState } from '../game/types.ts';
 import { squareToRC, rcToSquare, pieceColor, pieceType, makePiece, isSquareAttackedBy, generateLegal, findKing, applyMove } from '../engine/index.ts';
 
 export interface CardEffectResult {
   newState: SuperChessState;
   logEntry: string;
   materialDelta: number; // positive = good for the player who played it
+}
+
+/** Frozen pieces are an absolute lockdown for their owner: they can't move
+ * via chess (already enforced in generateLegal) AND they can't be the
+ * source/target of any card their owner plays. The freezer can still act
+ * on them (Coup, capture, etc.) \u2014 the whole point of Freeze is that
+ * the piece becomes a sitting duck. */
+function isFrozen(ss: SuperState, sq: Square): boolean {
+  const turns = ss.frozenSquares.get(sq);
+  return turns !== undefined && turns > 0;
 }
 
 function cloneSuperState(state: SuperChessState): SuperChessState {
@@ -20,7 +30,9 @@ function cloneSuperState(state: SuperChessState): SuperChessState {
       shieldedSquares: new Map(ss.shieldedSquares),
       shieldTurns: new Map(ss.shieldTurns),
       foulSquares: new Map(ss.foulSquares),
+      foulTurns: new Map(ss.foulTurns),
       mustMoveType: new Map(ss.mustMoveType),
+      mustMoveTurns: new Map(ss.mustMoveTurns),
       capturedByColor: new Map([
         ['w', [...(ss.capturedByColor.get('w') ?? [])]],
         ['b', [...(ss.capturedByColor.get('b') ?? [])]],
@@ -71,8 +83,15 @@ export const CARD_EFFECTS: Record<string, CardEffectFn> = {
     if (pieceType(p) === 'K') {
       return { newState: state, logEntry: 'Freeze: cannot freeze king', materialDelta: 0 };
     }
+    if (pieceColor(p) === color) {
+      return { newState: state, logEntry: 'Freeze: must target opponent piece', materialDelta: 0 };
+    }
     const next = cloneSuperState(state);
-    next.superState.frozenSquares.set(sq, 1);
+    // Turns counter in PLIES, not turns: 2 = "active during the opponent's
+    // next turn, expires at end of it". Setting 1 would tick down to 0 on
+    // the freezer's own tick and the opponent would never see it \u2014 that
+    // was the original Freeze bug.
+    next.superState.frozenSquares.set(sq, 2);
     return {
       newState: next,
       logEntry: `Freeze applied to ${p} at ${sqStr(sq)}`,
@@ -85,12 +104,25 @@ export const CARD_EFFECTS: Record<string, CardEffectFn> = {
     if (sq === undefined || state.chess.board[sq] === null) {
       return { newState: state, logEntry: 'Shield: invalid target', materialDelta: 0 };
     }
+    const p = state.chess.board[sq]!;
+    if (pieceType(p) === 'K') {
+      // King can't be shielded \u2014 makes the king effectively
+      // un-checkmateable until the shield ticks off (reported by
+      // playtester as broken design).
+      return { newState: state, logEntry: 'Shield: cannot shield king', materialDelta: 0 };
+    }
+    if (pieceColor(p) !== color) {
+      return { newState: state, logEntry: 'Shield: must target own piece', materialDelta: 0 };
+    }
+    if (isFrozen(state.superState, sq)) {
+      return { newState: state, logEntry: 'Shield: target is frozen', materialDelta: 0 };
+    }
     const next = cloneSuperState(state);
     next.superState.shieldedSquares.set(sq, color);
     next.superState.shieldTurns.set(sq, 2);
     return {
       newState: next,
-      logEntry: `Shield on ${state.chess.board[sq]} at ${sqStr(sq)}`,
+      logEntry: `Shield on ${p} at ${sqStr(sq)}`,
       materialDelta: 0,
     };
   },
@@ -99,6 +131,9 @@ export const CARD_EFFECTS: Record<string, CardEffectFn> = {
     const sq = target.ownPieceSquare;
     if (sq === undefined || state.chess.board[sq] === null) {
       return { newState: state, logEntry: "Knight's Path: invalid target", materialDelta: 0 };
+    }
+    if (isFrozen(state.superState, sq)) {
+      return { newState: state, logEntry: "Knight's Path: target is frozen", materialDelta: 0 };
     }
     const next = cloneSuperState(state);
     next.superState.knightsPathSquare = sq;
@@ -197,8 +232,26 @@ export const CARD_EFFECTS: Record<string, CardEffectFn> = {
     if (!p || pieceColor(p) !== color) {
       return { newState: state, logEntry: 'Teleport: invalid source piece', materialDelta: 0 };
     }
+    if (isFrozen(state.superState, from)) {
+      return { newState: state, logEntry: 'Teleport: source piece is frozen', materialDelta: 0 };
+    }
     if (state.chess.board[to] !== null) {
       return { newState: state, logEntry: 'Teleport: destination not empty', materialDelta: 0 };
+    }
+    // Reject teleporting a pawn onto its promotion rank \u2014 we don't
+    // give a free promote-via-teleport (would dwarf Promotion Rush).
+    // The full-game-validation fuzz used to fail with a wP on the back
+    // rank when this guard wasn't here.
+    if (pieceType(p) === 'P') {
+      const promRow = color === 'w' ? 0 : 7;
+      const [destRow] = squareToRC(to);
+      if (destRow === promRow) {
+        return {
+          newState: state,
+          logEntry: 'Teleport: cannot land a pawn on its promotion rank',
+          materialDelta: 0,
+        };
+      }
     }
     const next = cloneSuperState(state);
     next.chess.board[to] = p;
@@ -240,6 +293,8 @@ export const CARD_EFFECTS: Record<string, CardEffectFn> = {
     }
 
     for (const sq of sourceSquares) {
+      // Skip frozen pawns \u2014 owner can't move them via cards either.
+      if (isFrozen(next.superState, sq)) continue;
       const target = sq + dir;
       if (target < 0 || target >= 64) continue;
       if (board[target] !== null) continue;
@@ -266,6 +321,9 @@ export const CARD_EFFECTS: Record<string, CardEffectFn> = {
     if (!p || pieceType(p) !== 'P' || pieceColor(p) !== color) {
       return { newState: state, logEntry: 'Promotion Rush: must target own pawn', materialDelta: 0 };
     }
+    if (isFrozen(state.superState, sq)) {
+      return { newState: state, logEntry: 'Promotion Rush: target is frozen', materialDelta: 0 };
+    }
     const destRow = color === 'w' ? 1 : 6;
     const [srcRow, srcCol] = squareToRC(sq);
     if (srcRow === destRow) {
@@ -290,6 +348,9 @@ export const CARD_EFFECTS: Record<string, CardEffectFn> = {
     if (sq === undefined || state.chess.board[sq] === null) {
       return { newState: state, logEntry: 'Ghost Step: invalid target', materialDelta: 0 };
     }
+    if (isFrozen(state.superState, sq)) {
+      return { newState: state, logEntry: 'Ghost Step: target is frozen', materialDelta: 0 };
+    }
     const next = cloneSuperState(state);
     next.superState.ghostStepSquare = sq;
     return {
@@ -309,26 +370,51 @@ export const CARD_EFFECTS: Record<string, CardEffectFn> = {
     if (!p1 || !p2 || pieceColor(p1) !== color || pieceColor(p2) !== color) {
       return { newState: state, logEntry: 'Swap: must target two own pieces', materialDelta: 0 };
     }
+    if (isFrozen(state.superState, sq1) || isFrozen(state.superState, sq2)) {
+      return { newState: state, logEntry: 'Swap: one of the pieces is frozen', materialDelta: 0 };
+    }
+    // Reject swaps that would deposit a pawn on its promotion rank
+    // without promoting it. (Same hazard as Teleport's guard \u2014
+    // surfaced by the full-game-validation fuzz.)
+    const promRow = color === 'w' ? 0 : 7;
+    const [r1] = squareToRC(sq1);
+    const [r2] = squareToRC(sq2);
+    if (
+      (pieceType(p1) === 'P' && r2 === promRow) ||
+      (pieceType(p2) === 'P' && r1 === promRow)
+    ) {
+      return {
+        newState: state,
+        logEntry: 'Swap: cannot land a pawn on its promotion rank',
+        materialDelta: 0,
+      };
+    }
     const next = cloneSuperState(state);
     next.chess.board[sq1] = p2;
     next.chess.board[sq2] = p1;
-    // Move shields
-    const moveShield = (from: Square, to: Square) => {
-      if (next.superState.shieldedSquares.has(from)) {
-        next.superState.shieldedSquares.set(to, next.superState.shieldedSquares.get(from)!);
-        next.superState.shieldedSquares.delete(from);
-        if (next.superState.shieldTurns.has(from)) {
-          next.superState.shieldTurns.set(to, next.superState.shieldTurns.get(from)!);
-          next.superState.shieldTurns.delete(from);
-        }
-      }
-    };
-    const tmp1Shield = next.superState.shieldedSquares.has(sq1);
-    moveShield(sq1, -1 as Square); // temp
-    moveShield(sq2, sq1);
-    if (tmp1Shield) {
-      next.superState.shieldedSquares.set(sq2, color);
+
+    // Move shields with the pieces. The previous implementation re-set the
+    // shield to `color` (the caller) — which is fine right now because Swap
+    // only operates on the caller's own pieces, but it would silently rewrite
+    // shield ownership if that ever changed. Preserve the shield's actual
+    // stored owner / remaining-turns from the map instead.
+    const shield1 = next.superState.shieldedSquares.get(sq1) ?? null;
+    const shield2 = next.superState.shieldedSquares.get(sq2) ?? null;
+    const turns1 = next.superState.shieldTurns.get(sq1) ?? 0;
+    const turns2 = next.superState.shieldTurns.get(sq2) ?? 0;
+    next.superState.shieldedSquares.delete(sq1);
+    next.superState.shieldedSquares.delete(sq2);
+    next.superState.shieldTurns.delete(sq1);
+    next.superState.shieldTurns.delete(sq2);
+    if (shield1 !== null) {
+      next.superState.shieldedSquares.set(sq2, shield1);
+      if (turns1 > 0) next.superState.shieldTurns.set(sq2, turns1);
     }
+    if (shield2 !== null) {
+      next.superState.shieldedSquares.set(sq1, shield2);
+      if (turns2 > 0) next.superState.shieldTurns.set(sq1, turns2);
+    }
+
     return {
       newState: next,
       logEntry: `Swap: ${p1} ↔ ${p2} (${sqStr(sq1)} ↔ ${sqStr(sq2)})`,
@@ -344,6 +430,9 @@ export const CARD_EFFECTS: Record<string, CardEffectFn> = {
     const p = state.chess.board[sq];
     if (!p || pieceType(p) !== 'P' || pieceColor(p) !== color) {
       return { newState: state, logEntry: 'Fortify: must target own pawn', materialDelta: 0 };
+    }
+    if (isFrozen(state.superState, sq)) {
+      return { newState: state, logEntry: 'Fortify: target is frozen', materialDelta: 0 };
     }
     const next = cloneSuperState(state);
     next.superState.fortifiedPawnSquare = sq;
@@ -362,6 +451,9 @@ export const CARD_EFFECTS: Record<string, CardEffectFn> = {
     const p = state.chess.board[sq];
     if (!p || pieceType(p) !== 'P' || pieceColor(p) !== color) {
       return { newState: state, logEntry: 'Double Step: must target own pawn', materialDelta: 0 };
+    }
+    if (isFrozen(state.superState, sq)) {
+      return { newState: state, logEntry: 'Double Step: target is frozen', materialDelta: 0 };
     }
     const dir = color === 'w' ? -8 : 8;
     const mid = sq + dir;
@@ -396,6 +488,9 @@ export const CARD_EFFECTS: Record<string, CardEffectFn> = {
     if (!p || pieceColor(p) !== color) {
       return { newState: state, logEntry: 'Retreat: invalid piece', materialDelta: 0 };
     }
+    if (isFrozen(state.superState, sq)) {
+      return { newState: state, logEntry: 'Retreat: source piece is frozen', materialDelta: 0 };
+    }
     if (state.chess.board[dest] !== null) {
       return { newState: state, logEntry: 'Retreat: destination occupied', materialDelta: 0 };
     }
@@ -420,6 +515,119 @@ export const CARD_EFFECTS: Record<string, CardEffectFn> = {
     };
   },
 
+  // Pawn-only retreat: pick a pawn, move it 1 square backward (straight
+  // OR diagonal) toward your home rank. Destination must be empty.
+  // Cannot capture. Cannot leave own king in check. Lives in the
+  // "default" beginner pool.
+  'Pawn Retreat'(state, color, target) {
+    const sq = target.ownPieceSquare ?? target.square;
+    const dest = target.square !== sq ? target.square : undefined;
+    // For two-step targeting (own pawn + destination), the controller uses
+    // ownPieceSquare for the source and square for the destination. Detect
+    // and reject malformed targets explicitly.
+    const sourceSq = target.ownPieceSquare;
+    const destSq = target.square;
+    if (sourceSq === undefined || destSq === undefined) {
+      return { newState: state, logEntry: 'Pawn Retreat: need source pawn and destination', materialDelta: 0 };
+    }
+    const p = state.chess.board[sourceSq];
+    if (!p || pieceColor(p) !== color || pieceType(p) !== 'P') {
+      return { newState: state, logEntry: 'Pawn Retreat: must target your own pawn', materialDelta: 0 };
+    }
+    if (isFrozen(state.superState, sourceSq)) {
+      return { newState: state, logEntry: 'Pawn Retreat: target pawn is frozen', materialDelta: 0 };
+    }
+    // Validate "one square backward, straight or diagonal". Backward =
+    // toward own home rank (row 7 for white, row 0 for black). The
+    // diagonal case is non-capturing \u2014 destination must be empty.
+    const [srcR, srcC] = squareToRC(sourceSq);
+    const [dstR, dstC] = squareToRC(destSq);
+    const backwardSign = color === 'w' ? 1 : -1;
+    if (dstR - srcR !== backwardSign) {
+      return { newState: state, logEntry: 'Pawn Retreat: must move exactly one square backward', materialDelta: 0 };
+    }
+    if (Math.abs(dstC - srcC) > 1) {
+      return { newState: state, logEntry: 'Pawn Retreat: must move straight or one square diagonal', materialDelta: 0 };
+    }
+    if (state.chess.board[destSq] !== null) {
+      return { newState: state, logEntry: 'Pawn Retreat: destination must be empty (no capture)', materialDelta: 0 };
+    }
+    // King-in-check guard.
+    const testBoard = [...state.chess.board];
+    testBoard[destSq] = p;
+    testBoard[sourceSq] = null;
+    const kingSq = findKing(testBoard as typeof state.chess.board, color);
+    if (isSquareAttackedBy(testBoard as typeof state.chess.board, kingSq, color === 'w' ? 'b' : 'w')) {
+      return { newState: state, logEntry: 'Pawn Retreat: would leave king in check', materialDelta: 0 };
+    }
+    // Silence unused-var lint without sacrificing readability — sq / dest
+    // were initially extracted for naming but the two-step variables above
+    // are the real source of truth.
+    void sq; void dest;
+    const next = cloneSuperState(state);
+    next.chess.board[destSq] = p;
+    next.chess.board[sourceSq] = null;
+    return {
+      newState: next,
+      logEntry: `Pawn Retreat: ${p} from ${sqStr(sourceSq)} to ${sqStr(destSq)}`,
+      materialDelta: 0,
+    };
+  },
+
+  // Pawn moves 1 square diagonally forward to an EMPTY square (no capture).
+  // The "forward" direction matches normal pawn movement (toward opponent
+  // home rank). The destination must be empty — this is the whole point
+  // of the card: pawns get a way to step sideways without needing a
+  // capture target. Auto-promotes if it happens to land on the promotion
+  // rank (only possible from rank 7 for white / rank 2 for black).
+  Sidestep(state, color, target) {
+    const sourceSq = target.ownPieceSquare;
+    const destSq = target.square;
+    if (sourceSq === undefined || destSq === undefined) {
+      return { newState: state, logEntry: 'Sidestep: need source pawn and destination', materialDelta: 0 };
+    }
+    const p = state.chess.board[sourceSq];
+    if (!p || pieceColor(p) !== color || pieceType(p) !== 'P') {
+      return { newState: state, logEntry: 'Sidestep: must target your own pawn', materialDelta: 0 };
+    }
+    if (isFrozen(state.superState, sourceSq)) {
+      return { newState: state, logEntry: 'Sidestep: target pawn is frozen', materialDelta: 0 };
+    }
+    const [srcR, srcC] = squareToRC(sourceSq);
+    const [dstR, dstC] = squareToRC(destSq);
+    const forwardSign = color === 'w' ? -1 : 1;
+    if (dstR - srcR !== forwardSign) {
+      return { newState: state, logEntry: 'Sidestep: must move one square diagonally forward', materialDelta: 0 };
+    }
+    if (Math.abs(dstC - srcC) !== 1) {
+      return { newState: state, logEntry: 'Sidestep: must move one square diagonally (not straight)', materialDelta: 0 };
+    }
+    if (state.chess.board[destSq] !== null) {
+      return { newState: state, logEntry: 'Sidestep: destination must be empty (no capture)', materialDelta: 0 };
+    }
+    // Promotion check: if the pawn lands on its promotion rank, queen it.
+    const promRow = color === 'w' ? 0 : 7;
+    const placed = dstR === promRow ? makePiece(color, 'Q') : p;
+    // King-in-check guard.
+    const testBoard = [...state.chess.board];
+    testBoard[destSq] = placed;
+    testBoard[sourceSq] = null;
+    const kingSq = findKing(testBoard as typeof state.chess.board, color);
+    if (isSquareAttackedBy(testBoard as typeof state.chess.board, kingSq, color === 'w' ? 'b' : 'w')) {
+      return { newState: state, logEntry: 'Sidestep: would leave king in check', materialDelta: 0 };
+    }
+    const next = cloneSuperState(state);
+    next.chess.board[destSq] = placed;
+    next.chess.board[sourceSq] = null;
+    return {
+      newState: next,
+      logEntry: dstR === promRow
+        ? `Sidestep: pawn from ${sqStr(sourceSq)} to ${sqStr(destSq)} (promoted to Q)`
+        : `Sidestep: pawn from ${sqStr(sourceSq)} to ${sqStr(destSq)}`,
+      materialDelta: 0,
+    };
+  },
+
   'Foul Ground'(state, color, target) {
     const sq = target.square;
     if (sq === undefined) {
@@ -428,6 +636,9 @@ export const CARD_EFFECTS: Record<string, CardEffectFn> = {
     const opp: PieceColor = color === 'w' ? 'b' : 'w';
     const next = cloneSuperState(state);
     next.superState.foulSquares.set(sq, opp);
+    // 2 plies: survives setter's tick, active during opponent's turn,
+    // cleared at end of opponent's turn. See SuperState type comment.
+    next.superState.foulTurns.set(sq, 2);
     return {
       newState: next,
       logEntry: `Foul Ground: opponent cannot move to ${sqStr(sq)}`,
@@ -442,6 +653,9 @@ export const CARD_EFFECTS: Record<string, CardEffectFn> = {
     const opp: PieceColor = color === 'w' ? 'b' : 'w';
     const next = cloneSuperState(state);
     next.superState.mustMoveType.set(opp, target.pieceType);
+    // 2 plies: survives setter's tick, active during opponent's turn,
+    // cleared at end of opponent's turn. See SuperState type comment.
+    next.superState.mustMoveTurns.set(opp, 2);
     return {
       newState: next,
       logEntry: `Disrupt: opponent must move a ${target.pieceType} next turn`,
@@ -459,19 +673,24 @@ export const CARD_EFFECTS: Record<string, CardEffectFn> = {
     if (state.chess.turn !== color) {
       return { newState: state, logEntry: 'Mirror: not your turn', materialDelta: 0 };
     }
-    const opp: PieceColor = color === 'w' ? 'b' : 'w';
-    const movedPieceType = pieceType(state.chess.board[lastMove.from] ?? (opp + lastMove.color[1]));
+    // The piece type to mirror is read directly off the recorded last move —
+    // no inference, no string-indexing on color characters.
+    const movedPieceType = pieceType(lastMove.movingPiece);
     const targetSq = lastMove.to;
 
-    // Find own piece of same type that can reach targetSq
-    const legalMoves = generateLegal(state.chess);
-    const mirror = legalMoves.find(m => {
-      const p = state.chess.board[m.from];
-      return p && pieceColor(p) === color && pieceType(p) === movedPieceType && m.to === targetSq;
-    }) ?? legalMoves.find(m => {
-      const p = state.chess.board[m.from];
-      return p && pieceColor(p) === color && pieceType(p) === movedPieceType;
-    });
+    // Find own piece of same type that can reach targetSq. Pass
+    // frozenSquares so a frozen own piece is never selected as the
+    // mirroring source (treat freeze as absolute lockdown).
+    const frozen = new Set(state.superState.frozenSquares.keys());
+    const legalMoves = generateLegal(state.chess, frozen);
+    const mirror = legalMoves.find(m =>
+      pieceColor(m.movingPiece) === color &&
+      pieceType(m.movingPiece) === movedPieceType &&
+      m.to === targetSq,
+    ) ?? legalMoves.find(m =>
+      pieceColor(m.movingPiece) === color &&
+      pieceType(m.movingPiece) === movedPieceType,
+    );
 
     if (!mirror) {
       return { newState: state, logEntry: 'Mirror: no mirroring possible, card wasted', materialDelta: 0 };
@@ -479,9 +698,12 @@ export const CARD_EFFECTS: Record<string, CardEffectFn> = {
 
     const capture = mirror.capture ? pieceValueFor(pieceType(mirror.capture)) : 0;
     const next = cloneSuperState(state);
-    // Apply the move's board effects but un-toggle turn/full-move so the
-    // runner's consumeTurnBookkeeping can handle them uniformly with other
-    // turn-consuming cards.
+    // Apply the mirrored chess move, but then explicitly REVERT turn and
+    // fullMoveNumber back to pre-apply values. Mirror is a turn-consuming
+    // card; superChess.ts will call consumeTurnBookkeeping AFTER the card
+    // effect returns, which is what actually advances the turn. We keep
+    // applyMove's other side-effects (castling rights, en passant square,
+    // halfMoveClock — all of which depend on the mirrored move's content).
     const afterMove = applyMove(state.chess, mirror);
     next.chess = {
       ...afterMove,
@@ -493,7 +715,7 @@ export const CARD_EFFECTS: Record<string, CardEffectFn> = {
     }
     return {
       newState: next,
-      logEntry: `Mirror: ${state.chess.board[mirror.from]} from ${sqStr(mirror.from)} to ${sqStr(mirror.to)}`,
+      logEntry: `Mirror: ${mirror.movingPiece} from ${sqStr(mirror.from)} to ${sqStr(mirror.to)}`,
       materialDelta: capture,
     };
   },
@@ -529,6 +751,13 @@ export const CARD_EFFECTS: Record<string, CardEffectFn> = {
     if (myBest === null || oppBest === null) {
       return { newState: state, logEntry: 'Trade: not enough pawns on both sides', materialDelta: 0 };
     }
+    // Frozen pieces are an absolute lockdown for their owner. We can't
+    // move our own pawn out of the trade if it's frozen. (Trade is
+    // automatic, so we just refuse instead of falling back to a less
+    // advanced pawn \u2014 that would silently change the card's behaviour.)
+    if (isFrozen(state.superState, myBest)) {
+      return { newState: state, logEntry: 'Trade: own pawn is frozen', materialDelta: 0 };
+    }
 
     const next = cloneSuperState(state);
     const p1 = board[myBest]!, p2 = board[oppBest]!;
@@ -551,30 +780,54 @@ export const CARD_EFFECTS: Record<string, CardEffectFn> = {
     if (state.superState.timeWarpUsed.get(color)) {
       return { newState: state, logEntry: 'Time Warp: already used this game', materialDelta: 0 };
     }
-    if (state.snapshots.length < 2) {
+    // Snapshots are pushed at the top of every turn. The relevant stack
+    // when WE play Time Warp on our turn looks like:
+    //
+    //   [..., my-previous-turn, opponent-previous-turn, MY-CURRENT-TURN]
+    //
+    // To rewind to "start of my previous turn" (where chess.turn === color
+    // again so we can play a fresh move), we need at least 3 snapshots and
+    // we pop three off the stack.
+    if (state.snapshots.length < 3) {
       return { newState: state, logEntry: 'Time Warp: not enough history', materialDelta: 0 };
     }
-    // Pop last 2 snapshots, restore to 2 plies ago
     const snapshots = [...state.snapshots];
-    snapshots.pop(); // remove current
-    const prev = snapshots.pop()!; // state from 2 plies ago
+    snapshots.pop(); // discard the snapshot saved at top of THIS turn
+    snapshots.pop(); // discard opponent's last turn
+    const prev = snapshots.pop()!; // restore from start of MY previous turn
+
+    // Sanity: if the snapshot's turn doesn't match `color`, the snapshot
+    // stack is malformed — refuse rather than corrupt state further.
+    if (prev.chess.turn !== color) {
+      return { newState: state, logEntry: 'Time Warp: snapshot misaligned, refused', materialDelta: 0 };
+    }
+
     const next: SuperChessState = {
       chess: { ...prev.chess, board: [...prev.chess.board], castlingRights: { ...prev.chess.castlingRights } },
-      deck: state.deck,
+      // Restore the deck to its snapshotted state — otherwise hands /
+      // draw pile / discard pile leak into the rewound timeline.
+      deck: prev.deckState,
       superState: {
         ...prev.superState,
         frozenSquares: new Map(prev.superState.frozenSquares),
         shieldedSquares: new Map(prev.superState.shieldedSquares),
         shieldTurns: new Map(prev.superState.shieldTurns),
         foulSquares: new Map(prev.superState.foulSquares),
+        foulTurns: new Map(prev.superState.foulTurns),
         mustMoveType: new Map(prev.superState.mustMoveType),
+        mustMoveTurns: new Map(prev.superState.mustMoveTurns),
         capturedByColor: new Map([
           ['w', [...(prev.superState.capturedByColor.get('w') ?? [])]],
           ['b', [...(prev.superState.capturedByColor.get('b') ?? [])]],
         ]),
-        timeWarpUsed: new Map(state.superState.timeWarpUsed),
+        // Mark Time Warp as used by the caller AFTER copying the saved map —
+        // otherwise we'd lose the "used" marker on the OTHER player too.
+        timeWarpUsed: new Map(prev.superState.timeWarpUsed),
       },
-      history: state.history.slice(0, -2),
+      // History entries map 1:1 with moves+cards; trim to "before my
+      // previous turn". The 3 popped snapshots represent up to 3 plies of
+      // history events (one per turn).
+      history: state.history.slice(0, -3),
       result: null,
       snapshots,
     };

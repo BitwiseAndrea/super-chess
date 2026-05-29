@@ -1,16 +1,21 @@
 // src/engine/movegen.ts
-import type { Square, Move, ChessState, PieceStr, PieceType, SavedState } from './types.ts';
+import type { Square, Move, ChessState, PieceStr, SavedState } from './types.ts';
 import { squareToRC, rcToSquare, pieceColor, pieceType, makePiece, findKing, cloneCastlingRights } from './board.ts';
 
 // ─── helpers ───────────────────────────────────────────────────────────────
 
 function makeMove(
+  movingPiece: PieceStr,
   from: Square,
   to: Square,
   capture: PieceStr | null,
   promotion: PieceStr | null,
 ): Move {
-  return { from, to, capture, promotion, enPassantCaptureSq: null, newEnPassantSq: null, isCastle: false };
+  return {
+    movingPiece,
+    from, to, capture, promotion,
+    enPassantCaptureSq: null, newEnPassantSq: null, isCastle: false,
+  };
 }
 
 // ─── per-piece pseudo-legal generators ─────────────────────────────────────
@@ -32,13 +37,13 @@ export function pawnMoves(state: ChessState, sq: Square): Move[] {
     if (row > 0 && board[fwd] === null) {
       if (row - 1 === 0) {
         for (const pt of ['wQ', 'wR', 'wB', 'wN'] as PieceStr[]) {
-          moves.push(makeMove(sq, fwd, null, pt));
+          moves.push(makeMove(piece, sq, fwd, null, pt));
         }
       } else {
-        moves.push(makeMove(sq, fwd, null, null));
+        moves.push(makeMove(piece, sq, fwd, null, null));
         // Double push from rank 2 (row 6)
         if (row === 6 && board[sq - 16] === null) {
-          const m = makeMove(sq, sq - 16, null, null);
+          const m = makeMove(piece, sq, sq - 16, null, null);
           m.newEnPassantSq = fwd;
           moves.push(m);
         }
@@ -53,15 +58,26 @@ export function pawnMoves(state: ChessState, sq: Square): Move[] {
       if (target != null && pieceColor(target) === 'b') {
         if (row - 1 === 0) {
           for (const pt of ['wQ', 'wR', 'wB', 'wN'] as PieceStr[]) {
-            moves.push(makeMove(sq, capSq, target, pt));
+            moves.push(makeMove(piece, sq, capSq, target, pt));
           }
         } else {
-          moves.push(makeMove(sq, capSq, target, null));
+          moves.push(makeMove(piece, sq, capSq, target, null));
         }
       } else if (enPassantSquare === capSq) {
-        const m = makeMove(sq, capSq, 'bP', null);
-        m.enPassantCaptureSq = rcToSquare(row, nc);
-        moves.push(m);
+        // Defensive: only generate the e.p. move when there's
+        // actually a black pawn at the e.p. capture square. The e.p.
+        // square can desync from the board in contrived states (turn
+        // flipped manually, card effects, etc); without this guard
+        // we'd generate a "fake" capture move and undoMove would
+        // later restore a phantom piece to move.to. Caught by
+        // state-purity tests.
+        const epCapSq = rcToSquare(row, nc);
+        const epCapPiece = board[epCapSq];
+        if (epCapPiece && pieceColor(epCapPiece) === 'b' && pieceType(epCapPiece) === 'P') {
+          const m = makeMove(piece, sq, capSq, epCapPiece, null);
+          m.enPassantCaptureSq = epCapSq;
+          moves.push(m);
+        }
       }
     }
   } else {
@@ -70,12 +86,12 @@ export function pawnMoves(state: ChessState, sq: Square): Move[] {
     if (row < 7 && board[fwd] === null) {
       if (row + 1 === 7) {
         for (const pt of ['bQ', 'bR', 'bB', 'bN'] as PieceStr[]) {
-          moves.push(makeMove(sq, fwd, null, pt));
+          moves.push(makeMove(piece, sq, fwd, null, pt));
         }
       } else {
-        moves.push(makeMove(sq, fwd, null, null));
+        moves.push(makeMove(piece, sq, fwd, null, null));
         if (row === 1 && board[sq + 16] === null) {
-          const m = makeMove(sq, sq + 16, null, null);
+          const m = makeMove(piece, sq, sq + 16, null, null);
           m.newEnPassantSq = fwd;
           moves.push(m);
         }
@@ -89,15 +105,23 @@ export function pawnMoves(state: ChessState, sq: Square): Move[] {
       if (target != null && pieceColor(target) === 'w') {
         if (row + 1 === 7) {
           for (const pt of ['bQ', 'bR', 'bB', 'bN'] as PieceStr[]) {
-            moves.push(makeMove(sq, capSq, target, pt));
+            moves.push(makeMove(piece, sq, capSq, target, pt));
           }
         } else {
-          moves.push(makeMove(sq, capSq, target, null));
+          moves.push(makeMove(piece, sq, capSq, target, null));
         }
       } else if (enPassantSquare === capSq) {
-        const m = makeMove(sq, capSq, 'wP', null);
-        m.enPassantCaptureSq = rcToSquare(row, nc);
-        moves.push(m);
+        // Defensive: same guard as the white-pawn branch above. Only
+        // generate the e.p. move when there's actually a white pawn
+        // at the e.p. capture square; otherwise skip it. See the
+        // matching branch for the full rationale.
+        const epCapSq = rcToSquare(row, nc);
+        const epCapPiece = board[epCapSq];
+        if (epCapPiece && pieceColor(epCapPiece) === 'w' && pieceType(epCapPiece) === 'P') {
+          const m = makeMove(piece, sq, capSq, epCapPiece, null);
+          m.enPassantCaptureSq = epCapSq;
+          moves.push(m);
+        }
       }
     }
   }
@@ -118,9 +142,9 @@ export function knightMoves(state: ChessState, sq: Square): Move[] {
     const to = rcToSquare(nr, nc);
     const target = board[to];
     if (target === null) {
-      moves.push(makeMove(sq, to, null, null));
+      moves.push(makeMove(piece, sq, to, null, null));
     } else if (pieceColor(target) !== color) {
-      moves.push(makeMove(sq, to, target, null));
+      moves.push(makeMove(piece, sq, to, target, null));
     }
   }
   return moves;
@@ -139,10 +163,10 @@ export function slidingMoves(state: ChessState, sq: Square, dirs: [number, numbe
       const to = rcToSquare(nr, nc);
       const target = board[to];
       if (target === null) {
-        moves.push(makeMove(sq, to, null, null));
+        moves.push(makeMove(piece, sq, to, null, null));
       } else {
         if (pieceColor(target) !== color) {
-          moves.push(makeMove(sq, to, target, null));
+          moves.push(makeMove(piece, sq, to, target, null));
         }
         break;
       }
@@ -169,50 +193,63 @@ export function kingMoves(state: ChessState, sq: Square): Move[] {
       const to = rcToSquare(nr, nc);
       const target = board[to];
       if (target === null || pieceColor(target) !== color) {
-        moves.push(makeMove(sq, to, target ?? null, null));
+        moves.push(makeMove(piece, sq, to, target ?? null, null));
       }
     }
   }
 
-  // Castling
-  if (color === 'w' && sq === 60) {
-    if (castlingRights.wKingside && board[61] === null && board[62] === null &&
-        !isSquareAttackedBy(board, 60, opp) &&
-        !isSquareAttackedBy(board, 61, opp) &&
-        !isSquareAttackedBy(board, 62, opp)) {
-      const m = makeMove(60, 62, null, null);
-      m.isCastle = true; m.castleRookFrom = 63; m.castleRookTo = 61;
+  // Castling — only legal from the king's starting square. We derive the
+  // starting square from color (no hardcoded magic numbers): white king on
+  // e1 (rcToSquare(7,4)), black king on e8 (rcToSquare(0,4)).
+  const homeRow = HOME_ROW[color];
+  const kingHome = rcToSquare(homeRow, 4);
+  if (sq !== kingHome) return moves;
+
+  const ownRook = makePiece(color, 'R');
+  // Kingside: rook home file h (col 7), king travels e→g (cols 4→6),
+  // rook ends on f (col 5). Squares between must be empty and not attacked.
+  if (castlingRights[`${color}Kingside`]) {
+    const rookFrom = rcToSquare(homeRow, 7);
+    const fSq = rcToSquare(homeRow, 5);
+    const gSq = rcToSquare(homeRow, 6);
+    if (
+      board[rookFrom] === ownRook &&
+      board[fSq] === null && board[gSq] === null &&
+      !isSquareAttackedBy(board, sq, opp) &&
+      !isSquareAttackedBy(board, fSq, opp) &&
+      !isSquareAttackedBy(board, gSq, opp)
+    ) {
+      const m = makeMove(piece, sq, gSq, null, null);
+      m.isCastle = true; m.castleRookFrom = rookFrom; m.castleRookTo = fSq;
       moves.push(m);
     }
-    if (castlingRights.wQueenside && board[59] === null && board[58] === null && board[57] === null &&
-        !isSquareAttackedBy(board, 60, opp) &&
-        !isSquareAttackedBy(board, 59, opp) &&
-        !isSquareAttackedBy(board, 58, opp)) {
-      const m = makeMove(60, 58, null, null);
-      m.isCastle = true; m.castleRookFrom = 56; m.castleRookTo = 59;
-      moves.push(m);
-    }
-  } else if (color === 'b' && sq === 4) {
-    if (castlingRights.bKingside && board[5] === null && board[6] === null &&
-        !isSquareAttackedBy(board, 4, opp) &&
-        !isSquareAttackedBy(board, 5, opp) &&
-        !isSquareAttackedBy(board, 6, opp)) {
-      const m = makeMove(4, 6, null, null);
-      m.isCastle = true; m.castleRookFrom = 7; m.castleRookTo = 5;
-      moves.push(m);
-    }
-    if (castlingRights.bQueenside && board[3] === null && board[2] === null && board[1] === null &&
-        !isSquareAttackedBy(board, 4, opp) &&
-        !isSquareAttackedBy(board, 3, opp) &&
-        !isSquareAttackedBy(board, 2, opp)) {
-      const m = makeMove(4, 2, null, null);
-      m.isCastle = true; m.castleRookFrom = 0; m.castleRookTo = 3;
+  }
+  // Queenside: rook home file a (col 0), king travels e→c (cols 4→2),
+  // rook ends on d (col 3). b-file (col 1) must be empty but isn't checked
+  // for attack (rook passes through it).
+  if (castlingRights[`${color}Queenside`]) {
+    const rookFrom = rcToSquare(homeRow, 0);
+    const bSq = rcToSquare(homeRow, 1);
+    const cSq = rcToSquare(homeRow, 2);
+    const dSq = rcToSquare(homeRow, 3);
+    if (
+      board[rookFrom] === ownRook &&
+      board[bSq] === null && board[cSq] === null && board[dSq] === null &&
+      !isSquareAttackedBy(board, sq, opp) &&
+      !isSquareAttackedBy(board, dSq, opp) &&
+      !isSquareAttackedBy(board, cSq, opp)
+    ) {
+      const m = makeMove(piece, sq, cSq, null, null);
+      m.isCastle = true; m.castleRookFrom = rookFrom; m.castleRookTo = dSq;
       moves.push(m);
     }
   }
 
   return moves;
 }
+
+// Each color's home rank (row index, where row 0 = rank 8 / black home).
+const HOME_ROW: Record<'w' | 'b', number> = { w: 7, b: 0 };
 
 // ─── attack detection ───────────────────────────────────────────────────────
 
@@ -316,6 +353,7 @@ export function applyMove(state: ChessState, move: Move): ChessState {
 
 export function applyMoveInPlace(state: ChessState, move: Move): SavedState {
   const saved: SavedState = {
+    movingPiece: move.movingPiece,
     capturedPiece: move.capture,
     enPassantCapturePiece: move.enPassantCaptureSq !== null ? state.board[move.enPassantCaptureSq] : null,
     previousEnPassantSq: state.enPassantSquare,
@@ -330,7 +368,7 @@ export function applyMoveInPlace(state: ChessState, move: Move): SavedState {
 
 function applyMoveToBoard(state: ChessState, move: Move): void {
   const { board } = state;
-  const moving = board[move.from]!;
+  const moving = move.movingPiece;
   const color = pieceColor(moving);
   const type = pieceType(moving);
 
@@ -349,27 +387,24 @@ function applyMoveToBoard(state: ChessState, move: Move): void {
     board[move.castleRookFrom] = null;
   }
 
-  // Update castling rights
+  // Update castling rights — driven by piece identity and home-row geometry,
+  // not by hardcoded square numbers (would break if cards moved the rook).
   if (type === 'K') {
-    if (color === 'w') {
-      state.castlingRights.wKingside = false;
-      state.castlingRights.wQueenside = false;
-    } else {
-      state.castlingRights.bKingside = false;
-      state.castlingRights.bQueenside = false;
-    }
+    state.castlingRights[`${color}Kingside`] = false;
+    state.castlingRights[`${color}Queenside`] = false;
   }
   if (type === 'R') {
-    if (move.from === 63) state.castlingRights.wKingside = false;
-    if (move.from === 56) state.castlingRights.wQueenside = false;
-    if (move.from === 7) state.castlingRights.bKingside = false;
-    if (move.from === 0) state.castlingRights.bQueenside = false;
+    const ownHomeRow = HOME_ROW[color];
+    if (move.from === rcToSquare(ownHomeRow, 7)) state.castlingRights[`${color}Kingside`] = false;
+    if (move.from === rcToSquare(ownHomeRow, 0)) state.castlingRights[`${color}Queenside`] = false;
   }
-  // If a rook is captured on its starting square
-  if (move.to === 63 && move.capture) state.castlingRights.wKingside = false;
-  if (move.to === 56 && move.capture) state.castlingRights.wQueenside = false;
-  if (move.to === 7 && move.capture) state.castlingRights.bKingside = false;
-  if (move.to === 0 && move.capture) state.castlingRights.bQueenside = false;
+  // A rook captured on its own starting square revokes that side's rights.
+  if (move.capture && pieceType(move.capture) === 'R') {
+    const oppColor = pieceColor(move.capture);
+    const oppHomeRow = HOME_ROW[oppColor];
+    if (move.to === rcToSquare(oppHomeRow, 7)) state.castlingRights[`${oppColor}Kingside`] = false;
+    if (move.to === rcToSquare(oppHomeRow, 0)) state.castlingRights[`${oppColor}Queenside`] = false;
+  }
 
   // En passant square
   state.enPassantSquare = move.newEnPassantSq;
@@ -390,22 +425,23 @@ function applyMoveToBoard(state: ChessState, move: Move): void {
 
 export function undoMove(state: ChessState, move: Move, saved: SavedState): void {
   const { board } = state;
-  // The piece currently on move.to is the piece that just moved (possibly
-  // promoted). Its color tells us which color the original pawn was, even in
-  // weird Trade-induced positions where the pawn lives off its normal rank.
-  const landedPiece = board[move.to]!;
-  const movedColor = pieceColor(landedPiece);
-  const originalPiece = move.promotion !== null
-    ? makePiece(movedColor, 'P')
-    : landedPiece;
+  // Restore exactly what was there before the move \u2014 no inference. The
+  // moving piece is the one we recorded in SavedState (un-promoted shape).
+  board[move.from] = saved.movingPiece;
 
-  board[move.from] = originalPiece;
-  board[move.to] = saved.capturedPiece;
-
-  // Restore en passant captured pawn
-  if (move.enPassantCaptureSq !== null && saved.enPassantCapturePiece !== null) {
-    board[move.enPassantCaptureSq] = saved.enPassantCapturePiece;
+  // For e.p. captures the captured pawn lived at `enPassantCaptureSq`,
+  // NOT at `move.to`. Belt-and-braces guard: never restore a piece at
+  // move.to for an e.p. move, even if `saved.capturedPiece` happens to
+  // be set (which can happen in contrived states where pseudo-legal
+  // generation produced a stale e.p. move). Caught by state-purity
+  // tests after we hit the phantom-pawn bug.
+  if (move.enPassantCaptureSq !== null) {
     board[move.to] = null;
+    if (saved.enPassantCapturePiece !== null) {
+      board[move.enPassantCaptureSq] = saved.enPassantCapturePiece;
+    }
+  } else {
+    board[move.to] = saved.capturedPiece;
   }
 
   // Restore castling rook
@@ -457,8 +493,9 @@ export function generateLegal(state: ChessState, frozenSquares?: Set<Square>): M
     if (move.capture && pieceType(move.capture) === 'K') continue;
 
     const saved = applyMoveInPlace(state, move);
-    // After applying, turn has switched — check the PREVIOUS player's king
-    const prevColor = state.turn === 'w' ? 'b' : 'w';
+    // The PREVIOUS player (the one who just moved) is recorded in saved.previousTurn;
+    // their king must not be in check after the move.
+    const prevColor = saved.previousTurn;
     let kingSq: number;
     try {
       kingSq = findKing(state.board, prevColor);
@@ -479,8 +516,10 @@ export function generateLegal(state: ChessState, frozenSquares?: Set<Square>): M
 // ─── algebraic notation ─────────────────────────────────────────────────────
 
 export function toAlgebraic(state: ChessState, move: Move): string {
-  const { board } = state;
-  const moving = board[move.from]!;
+  // Use the move's recorded movingPiece — works regardless of whether `state`
+  // is pre- or post-apply, and tolerates card-induced board edits between
+  // generation and rendering.
+  const moving = move.movingPiece;
   const t = pieceType(moving);
 
   if (move.isCastle) {
@@ -488,7 +527,7 @@ export function toAlgebraic(state: ChessState, move: Move): string {
   }
 
   const dest = move.to;
-  const { squareToAlgebraic: s2a } = { squareToAlgebraic: (sq: number) => String.fromCharCode(97 + (sq & 7)) + String(8 - (sq >> 3)) };
+  const s2a = (sq: number): string => String.fromCharCode(97 + (sq & 7)) + String(8 - (sq >> 3));
 
   if (t === 'P') {
     let n = '';
@@ -500,11 +539,12 @@ export function toAlgebraic(state: ChessState, move: Move): string {
     return n;
   }
 
-  // Disambiguation: check if another piece of same type can also go to dest
+  // Disambiguation: check if another piece of same type and color can also
+  // go to dest in this state.
   const legal = generateLegal(state);
   const ambiguous = legal.filter(m =>
     m.from !== move.from &&
-    board[m.from] === moving &&
+    m.movingPiece === moving &&
     m.to === dest
   );
 

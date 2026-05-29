@@ -28,14 +28,23 @@ describe('Deck', () => {
     expect(deck.drawPileSize).toBe(totalCopies - 1);
   });
 
-  it('respects maxHandSize of 2', () => {
+  it('respects the default maxHandSize from JSON', () => {
     const deck = new Deck(CARD_DEFINITIONS);
     deck.shuffle();
-    deck.draw('w');
-    deck.draw('w');
-    const third = deck.draw('w'); // should return null
-    expect(third).toBeNull();
-    expect(deck.handSize('w')).toBe(2);
+    const max = deck.maxHandSize;
+    for (let i = 0; i < max; i++) deck.draw('w');
+    const overflow = deck.draw('w'); // should return null
+    expect(overflow).toBeNull();
+    expect(deck.handSize('w')).toBe(max);
+  });
+
+  it('honors a custom maxHandSize override', () => {
+    const deck = new Deck(CARD_DEFINITIONS, { maxHandSize: 5 });
+    deck.shuffle();
+    expect(deck.maxHandSize).toBe(5);
+    for (let i = 0; i < 5; i++) deck.draw('w');
+    expect(deck.handSize('w')).toBe(5);
+    expect(deck.draw('w')).toBeNull();
   });
 
   it('discard moves card from hand to discard pile', () => {
@@ -54,7 +63,7 @@ describe('Deck', () => {
     const drawn: ReturnType<typeof deck.draw>[] = [];
     while (deck.drawPileSize > 0) {
       drawn.push(deck.draw('w'));
-      if (deck.handSize('w') === 2) {
+      if (deck.handSize('w') === deck.maxHandSize) {
         deck.discard('w', deck.getHand('w')[0]);
       }
     }

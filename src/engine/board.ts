@@ -1,5 +1,6 @@
 // src/engine/board.ts
 import type { Square, PieceColor, PieceType, PieceStr, Board, ChessState, CastlingRights } from './types.ts';
+import { PIECE_VALUES } from '../data/superChessData.ts';
 
 export function squareToRC(sq: Square): [row: number, col: number] {
   return [sq >> 3, sq & 7];
@@ -33,14 +34,7 @@ export function makePiece(color: PieceColor, type: PieceType): PieceStr {
 }
 
 export function pieceValue(type: PieceType): number {
-  switch (type) {
-    case 'P': return 100;
-    case 'N': return 320;
-    case 'B': return 330;
-    case 'R': return 500;
-    case 'Q': return 900;
-    case 'K': return 20000;
-  }
+  return PIECE_VALUES[type];
 }
 
 export function totalMaterial(board: Board, color: PieceColor): number {

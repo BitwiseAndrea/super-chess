@@ -47,8 +47,20 @@ export function validateSuperChessMove(
   return null;
 }
 
-// Generate legal moves respecting Super Chess constraints
+// Generate legal moves respecting Super Chess constraints.
+//
+// `color` MUST equal `state.chess.turn` — the engine generates moves for
+// whichever side is on the move, and silently filtering by color after the
+// fact masks real lifecycle bugs (e.g. the Extra Move bonus calling this
+// with `color='w'` while turn was 'b', getting black's moves back, and
+// nobody noticing). Assert loudly so callers fix their state first.
 export function getSuperChessLegalMoves(state: SuperChessState, color: PieceColor): Move[] {
+  if (state.chess.turn !== color) {
+    throw new Error(
+      `getSuperChessLegalMoves: chess.turn is ${state.chess.turn} but caller asked for ${color}. ` +
+      'Adjust state.chess.turn before calling (or, if mid-bonus-move, after un-flipping the turn).',
+    );
+  }
   const { chess, superState } = state;
   const frozen = new Set<Square>(superState.frozenSquares.keys());
 
@@ -67,6 +79,21 @@ export function getSuperChessLegalMoves(state: SuperChessState, color: PieceColo
 
   // Apply Foul Ground: remove moves to fouled squares
   baseMoves = baseMoves.filter((m) => superState.foulSquares.get(m.to) !== color);
+
+  // Shield: capturing a shielded enemy piece is not legal. Previously the
+  // shield check lived only in `validateSuperChessMove`, which isn't on
+  // any commit path \u2014 so the bot would happily pick "take the shielded
+  // bishop" and the move would go through unfiltered. Filtering at the
+  // legal-moves source ensures both AI search and human drag-and-drop
+  // see the same rule. (A piece can never capture its OWN-color shielded
+  // piece because friendly captures aren't legal in standard chess
+  // anyway, but the explicit owner check keeps the intent obvious.)
+  baseMoves = baseMoves.filter((m) => {
+    if (m.capture === null) return true;
+    const shieldOwner = superState.shieldedSquares.get(m.to);
+    if (shieldOwner === undefined) return true;
+    return shieldOwner === color;
+  });
 
   // Apply Knight's Path: add knight moves from flagged piece
   if (superState.knightsPathSquare !== null) {
@@ -162,21 +189,33 @@ function generateGhostMoves(
   }));
 }
 
-// Tick / clean Super Chess state after a turn
+// Tick / clean Super Chess state after a turn.
+//
+// IMPORTANT: this fires after EVERY ply (each color's chess move OR each
+// turn-consuming card play). For effects intended to last "one OPPONENT
+// turn", the timer must therefore start at 2 plies (1 for the setter's
+// own tick + 1 for the opponent's tick after their move). Setting an
+// effect with timer=1 means it expires before the opponent ever sees it.
+// See the SuperState type comment for the convention.
 export function tickSuperState(ss: SuperState): SuperState {
   const next: SuperState = {
     frozenSquares: new Map(),
     shieldedSquares: new Map(ss.shieldedSquares),
     shieldTurns: new Map(),
     foulSquares: new Map(),
+    foulTurns: new Map(),
     mustMoveType: new Map(),
+    mustMoveTurns: new Map(),
     capturedByColor: ss.capturedByColor,
     lastMove: ss.lastMove,
     turnsSinceCapture: ss.turnsSinceCapture,
     knightsPathSquare: null,        // expires each turn
     ghostStepSquare: null,
     fortifiedPawnSquare: null,
-    extraMoveRemaining: null,
+    // PRESERVED. Extra Move card sets this in the card phase; it MUST survive
+    // the post-chess-move tick so the bonus-move handler downstream can fire.
+    // The handler clears it explicitly once consumed.
+    extraMoveRemaining: ss.extraMoveRemaining,
     fogActive: false,               // expires after opponent's turn
     timeWarpUsed: ss.timeWarpUsed,
   };
@@ -195,9 +234,30 @@ export function tickSuperState(ss: SuperState): SuperState {
     }
   }
 
-  // Foul ground and mustMoveType expire after opponent's turn (set, opponent plays, then clear)
-  // The current tick clears them as they were set the previous turn
-  // (They are set during the card play, remain for opponent's turn, cleared here)
+  // Tick foul squares (forbidden-entry markers from Foul Ground). Effect
+  // and timer are kept in sync — clear from BOTH maps when the timer
+  // expires, and only keep entries whose timer is still > 0. Previously
+  // this just wiped foulSquares unconditionally, which meant the foul
+  // expired before the opponent ever saw it.
+  for (const [sq, turns] of ss.foulTurns) {
+    if (turns - 1 > 0) {
+      next.foulTurns.set(sq, turns - 1);
+      const color = ss.foulSquares.get(sq);
+      if (color !== undefined) next.foulSquares.set(sq, color);
+    }
+    // else: drop from both maps
+  }
+
+  // Tick the "must move this piece type" constraint set by Disrupt. Same
+  // bug as foul squares had — unconditional wipe meant the constraint
+  // never reached the opponent.
+  for (const [color, turns] of ss.mustMoveTurns) {
+    if (turns - 1 > 0) {
+      next.mustMoveTurns.set(color, turns - 1);
+      const type = ss.mustMoveType.get(color);
+      if (type !== undefined) next.mustMoveType.set(color, type);
+    }
+  }
 
   return next;
 }
@@ -230,6 +290,53 @@ export function consumeTurnBookkeeping(
   return { ...state, chess, superState };
 }
 
+/**
+ * Transfer a piece's shield from its source square to its destination
+ * when it moves. The shield follows the piece \u2014 a player who shields
+ * their bishop and then moves it should keep the shield, otherwise
+ * Shield is broken-feeling (reported as a bug in playtesting). For
+ * castling, also transfer the rook's shield from its corner to its
+ * post-castle square.
+ */
+export function transferMovedPieceShield(ss: SuperState, move: Move): SuperState {
+  const hasFromShield = ss.shieldedSquares.has(move.from);
+  const rookFrom = move.isCastle ? move.castleRookFrom : undefined;
+  const rookTo = move.isCastle ? move.castleRookTo : undefined;
+  const hasRookShield = rookFrom !== undefined && ss.shieldedSquares.has(rookFrom);
+  if (!hasFromShield && !hasRookShield) return ss;
+
+  const next = {
+    ...ss,
+    shieldedSquares: new Map(ss.shieldedSquares),
+    shieldTurns: new Map(ss.shieldTurns),
+  };
+
+  if (hasFromShield) {
+    const color = next.shieldedSquares.get(move.from)!;
+    const turns = next.shieldTurns.get(move.from) ?? 0;
+    next.shieldedSquares.delete(move.from);
+    next.shieldTurns.delete(move.from);
+    next.shieldedSquares.set(move.to, color);
+    if (turns > 0) next.shieldTurns.set(move.to, turns);
+  }
+
+  if (hasRookShield && rookFrom !== undefined && rookTo !== undefined) {
+    const color = next.shieldedSquares.get(rookFrom)!;
+    const turns = next.shieldTurns.get(rookFrom) ?? 0;
+    next.shieldedSquares.delete(rookFrom);
+    next.shieldTurns.delete(rookFrom);
+    next.shieldedSquares.set(rookTo, color);
+    if (turns > 0) next.shieldTurns.set(rookTo, turns);
+  }
+
+  return next;
+}
+
+/**
+ * @deprecated Use transferMovedPieceShield. Kept for legacy callers
+ * that haven't been migrated; behaves identically to the original
+ * "shield evaporates on movement" semantics.
+ */
 export function clearMovedPieceShield(ss: SuperState, from: Square): SuperState {
   if (!ss.shieldedSquares.has(from)) return ss;
   const next = { ...ss, shieldedSquares: new Map(ss.shieldedSquares), shieldTurns: new Map(ss.shieldTurns) };

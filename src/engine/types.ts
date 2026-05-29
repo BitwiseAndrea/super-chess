@@ -39,6 +39,12 @@ export interface ChessState {
 export interface Move {
   from: Square;
   to: Square;
+  /** The piece sitting on `from` BEFORE the move is applied. Populated at
+   * generation time so downstream consumers (undoMove, toAlgebraic, Mirror
+   * card effect, etc.) never have to re-derive piece identity from the
+   * board — which would be wrong if any caller inspects the move after
+   * apply, or in card-induced positions where the obvious heuristics fail. */
+  movingPiece: PieceStr;
   capture: PieceStr | null;
   promotion: PieceStr | null;
   enPassantCaptureSq: Square | null; // square of the captured pawn in e.p.
@@ -54,16 +60,16 @@ export interface AnnotatedMove extends Move {
   color: PieceColor;
 }
 
-// Saved state for undoMove
+// Saved state for undoMove. Stored explicitly — undoMove does NO inference.
+// Each field corresponds 1:1 with something applyMoveInPlace mutates.
 export interface SavedState {
+  /** Piece that was at `move.from` before the move (pre-promotion shape). */
+  movingPiece: PieceStr;
   capturedPiece: PieceStr | null;
   enPassantCapturePiece: PieceStr | null;
   previousEnPassantSq: Square | null;
   previousCastlingRights: CastlingRights;
   previousHalfMoveClock: number;
   previousFullMoveNumber: number;
-  // Saved explicitly: in normal play this equals the moving piece's color,
-  // but Super Chess card effects (e.g. Trade) can place pieces on ranks
-  // where the moved-piece color cannot be safely inferred from move.from.
   previousTurn: PieceColor;
 }

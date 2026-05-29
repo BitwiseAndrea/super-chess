@@ -1,7 +1,18 @@
 // src/engine/evaluate.ts
 // Material + piece-square table evaluation. White-positive.
+//
+// All tunable constants and tables live in `public/super-chess.json` (the
+// single source of truth shared with the Roblox port). Edit there and re-run
+// `pnpm cards:sync` to regenerate the Luau snapshot.
 import type { ChessState, PieceType } from './types.ts';
 import { pieceColor, pieceType, pieceValue } from './board.ts';
+import {
+  PIECE_SQUARE_TABLES,
+  TEMPO_COMPENSATION_CP as DATA_TEMPO,
+  FROZEN_PENALTY as DATA_FROZEN,
+  SHIELD_BONUS as DATA_SHIELD,
+  FOUL_SQ_PENALTY as DATA_FOUL,
+} from '../data/superChessData.ts';
 
 // Card-state context passed in from Super Chess layer (avoids circular deps).
 export interface CardEvalContext {
@@ -10,92 +21,12 @@ export interface CardEvalContext {
   foulSquares: ReadonlyMap<number, 'w' | 'b'>; // sq → color FORBIDDEN from entering
 }
 
-// Bonus/penalty values (centipawns)
-const FROZEN_PENALTY  = 50;   // immobile piece is effectively weaker
-const SHIELD_BONUS    = 35;   // piece can't be instantly taken
-const FOUL_SQ_PENALTY = 20;   // square off-limits → positional restriction
+const FROZEN_PENALTY  = DATA_FROZEN;
+const SHIELD_BONUS    = DATA_SHIELD;
+const FOUL_SQ_PENALTY = DATA_FOUL;
 
-// Tune this to balance white's first-move structural advantage.
-// Target: ~55% white / ~30% draw / ~15% black in engine-vs-engine.
-// Increase if white still wins too often; decrease if black starts dominating.
-export const TEMPO_COMPENSATION_CP = 75;
-
-// Piece-square tables (from white's perspective, index 0 = a8, 63 = h1)
-// Positive values encourage pieces to go to those squares.
-const PST_PAWN: number[] = [
-   0,  0,  0,  0,  0,  0,  0,  0,  // rank 8 (promotion handled separately)
-  50, 50, 50, 50, 50, 50, 50, 50,  // rank 7
-  10, 10, 20, 30, 30, 20, 10, 10,  // rank 6
-   5,  5, 10, 25, 25, 10,  5,  5,  // rank 5
-   0,  0,  0, 20, 20,  0,  0,  0,  // rank 4
-   5, -5,-10,  0,  0,-10, -5,  5,  // rank 3
-   5, 10, 10,-20,-20, 10, 10,  5,  // rank 2
-   0,  0,  0,  0,  0,  0,  0,  0,  // rank 1
-];
-
-const PST_KNIGHT: number[] = [
-  -50,-40,-30,-30,-30,-30,-40,-50,
-  -40,-20,  0,  0,  0,  0,-20,-40,
-  -30,  0, 10, 15, 15, 10,  0,-30,
-  -30,  5, 15, 20, 20, 15,  5,-30,
-  -30,  0, 15, 20, 20, 15,  0,-30,
-  -30,  5, 10, 15, 15, 10,  5,-30,
-  -40,-20,  0,  5,  5,  0,-20,-40,
-  -50,-40,-30,-30,-30,-30,-40,-50,
-];
-
-const PST_BISHOP: number[] = [
-  -20,-10,-10,-10,-10,-10,-10,-20,
-  -10,  0,  0,  0,  0,  0,  0,-10,
-  -10,  0,  5, 10, 10,  5,  0,-10,
-  -10,  5,  5, 10, 10,  5,  5,-10,
-  -10,  0, 10, 10, 10, 10,  0,-10,
-  -10, 10, 10, 10, 10, 10, 10,-10,
-  -10,  5,  0,  0,  0,  0,  5,-10,
-  -20,-10,-10,-10,-10,-10,-10,-20,
-];
-
-const PST_ROOK: number[] = [
-   0,  0,  0,  0,  0,  0,  0,  0,
-   5, 10, 10, 10, 10, 10, 10,  5,
-  -5,  0,  0,  0,  0,  0,  0, -5,
-  -5,  0,  0,  0,  0,  0,  0, -5,
-  -5,  0,  0,  0,  0,  0,  0, -5,
-  -5,  0,  0,  0,  0,  0,  0, -5,
-  -5,  0,  0,  0,  0,  0,  0, -5,
-   0,  0,  0,  5,  5,  0,  0,  0,
-];
-
-const PST_QUEEN: number[] = [
-  -20,-10,-10, -5, -5,-10,-10,-20,
-  -10,  0,  0,  0,  0,  0,  0,-10,
-  -10,  0,  5,  5,  5,  5,  0,-10,
-   -5,  0,  5,  5,  5,  5,  0, -5,
-    0,  0,  5,  5,  5,  5,  0, -5,
-  -10,  5,  5,  5,  5,  5,  0,-10,
-  -10,  0,  5,  0,  0,  0,  0,-10,
-  -20,-10,-10, -5, -5,-10,-10,-20,
-];
-
-const PST_KING_MG: number[] = [
-  -30,-40,-40,-50,-50,-40,-40,-30,
-  -30,-40,-40,-50,-50,-40,-40,-30,
-  -30,-40,-40,-50,-50,-40,-40,-30,
-  -30,-40,-40,-50,-50,-40,-40,-30,
-  -20,-30,-30,-40,-40,-30,-30,-20,
-  -10,-20,-20,-20,-20,-20,-20,-10,
-   20, 20,  0,  0,  0,  0, 20, 20,
-   20, 30, 10,  0,  0, 10, 30, 20,
-];
-
-export const PST: Record<PieceType, number[]> = {
-  P: PST_PAWN,
-  N: PST_KNIGHT,
-  B: PST_BISHOP,
-  R: PST_ROOK,
-  Q: PST_QUEEN,
-  K: PST_KING_MG,
-};
+export const TEMPO_COMPENSATION_CP = DATA_TEMPO;
+export const PST: Record<PieceType, number[]> = PIECE_SQUARE_TABLES;
 
 export interface EvalBreakdown {
   material: number;

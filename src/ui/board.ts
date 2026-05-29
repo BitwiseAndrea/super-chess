@@ -18,6 +18,10 @@ export interface BoardRenderOptions {
   legalDestinations?: Square[];    // squares to highlight as legal moves
   cardTargetSquares?: Square[];    // squares highlighted as valid card targets
   checkSquare?: Square | null;     // king-in-check square (red tint)
+  /** Pilot's suggested move — both squares get an accent tint + ring so
+   * the user can see what's being proposed before clicking confirm. */
+  pilotSuggestionFrom?: Square | null;
+  pilotSuggestionTo?: Square | null;
 }
 
 export interface BoardClickHandlers {
@@ -89,6 +93,8 @@ export class BoardRenderer {
       legal: new Set(),
       cardTargets: new Set(),
       checkSq: null,
+      pilotFrom: null,
+      pilotTo: null,
     });
   }
 
@@ -119,6 +125,8 @@ export class BoardRenderer {
       legal: new Set(opts.legalDestinations ?? []),
       cardTargets: new Set(opts.cardTargetSquares ?? []),
       checkSq: opts.checkSquare ?? null,
+      pilotFrom: opts.pilotSuggestionFrom ?? null,
+      pilotTo: opts.pilotSuggestionTo ?? null,
     });
 
     for (const s of slides.slides) {
@@ -262,6 +270,8 @@ export class BoardRenderer {
       legal: Set<Square>;
       cardTargets: Set<Square>;
       checkSq: Square | null;
+      pilotFrom: Square | null;
+      pilotTo: Square | null;
     },
   ): void {
     while (this.svg.firstChild) this.svg.removeChild(this.svg.firstChild);
@@ -295,6 +305,13 @@ export class BoardRenderer {
       // Card-target tint
       if (o.cardTargets.has(sq)) {
         this.addRect(x, y, THEME.cardTarget, sq);
+      }
+
+      // Pilot suggestion tint — accent-colored wash on both the suggested
+      // from + to squares so the user sees the proposed move at a glance.
+      // Placed before frozen/shielded so those still read clearly on top.
+      if (o.pilotFrom === sq || o.pilotTo === sq) {
+        this.addRect(x, y, THEME.pilotSuggestion, sq);
       }
 
       // Special overlays
@@ -336,6 +353,12 @@ export class BoardRenderer {
       // Card-target ring
       if (o.cardTargets.has(sq)) {
         this.addRing(x, y, THEME.cardTargetRing, 2);
+      }
+
+      // Pilot suggestion ring — accent-colored stroke on the from + to
+      // squares of the pilot's proposed move.
+      if (o.pilotFrom === sq || o.pilotTo === sq) {
+        this.addRing(x, y, THEME.pilotSuggestionRing, 3);
       }
 
       // Legal-move dot (or capture ring if there's a piece on the dest)

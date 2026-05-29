@@ -1,14 +1,22 @@
 // src/cards/deck.ts
 import type { PieceColor } from '../engine/types.ts';
 import type { CardDefinition, CardInstance, DeckState } from './types.ts';
+import { MAX_HAND_SIZE } from '../data/superChessData.ts';
+
+export interface DeckOptions {
+  /** Override the JSON-default max hand size. Used by configurable
+   * difficulty / pacing flows where players choose 2\u20135 cards. */
+  maxHandSize?: number;
+}
 
 export class Deck {
   private drawPile: CardInstance[] = [];
   private discardPile: CardInstance[] = [];
   readonly hands: { white: CardInstance[]; black: CardInstance[] } = { white: [], black: [] };
-  readonly maxHandSize = 2;
+  readonly maxHandSize: number;
 
-  constructor(definitions: CardDefinition[]) {
+  constructor(definitions: CardDefinition[], options: DeckOptions = {}) {
+    this.maxHandSize = options.maxHandSize ?? MAX_HAND_SIZE;
     let idx = 0;
     for (const def of definitions) {
       for (let i = 0; i < def.copies; i++) {
@@ -125,5 +133,23 @@ export class Deck {
         black: [...this.hands.black],
       },
     };
+  }
+
+  /** Rehydrate a Deck from a snapshot. Used by Time Warp to rewind the deck
+   * alongside the chess board, so a rewound timeline doesn't leak cards from
+   * the future. */
+  static fromState(state: DeckState, options: DeckOptions = {}): Deck {
+    // We construct with an empty definitions list so the constructor doesn't
+    // re-seed the draw pile, then graft the snapshotted card instances on
+    // top. Cards are referentially shared with the snapshot (intentional \u2014
+    // CardInstance is immutable in practice).
+    const d = new Deck([], options);
+    d.drawPile = [...state.drawPile];
+    d.discardPile = [...state.discardPile];
+    d.hands.white.length = 0;
+    d.hands.white.push(...state.hand.white);
+    d.hands.black.length = 0;
+    d.hands.black.push(...state.hand.black);
+    return d;
   }
 }

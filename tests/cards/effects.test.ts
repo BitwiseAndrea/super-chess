@@ -21,12 +21,16 @@ function makeState(fen = STARTING_FEN): SuperChessState {
 }
 
 describe('Freeze effect', () => {
-  it('adds target square to frozenSquares', () => {
+  it('adds target square to frozenSquares with a 2-ply timer', () => {
     const state = makeState();
     const sq = algebraicToSquare('e7'); // black pawn
     const { newState } = CARD_EFFECTS['Freeze'](state, 'w', { oppPieceSquare: sq });
     expect(newState.superState.frozenSquares.has(sq)).toBe(true);
-    expect(newState.superState.frozenSquares.get(sq)).toBe(1);
+    // 2, not 1 — timer ticks once on the SETTER's own ply, so a 1-ply
+    // freeze expires before the opponent ever sees it. The full
+    // "stays active on opponent's turn" regression lives in
+    // tests/cards/all-cards.test.ts.
+    expect(newState.superState.frozenSquares.get(sq)).toBe(2);
   });
 
   it('cannot freeze the king', () => {

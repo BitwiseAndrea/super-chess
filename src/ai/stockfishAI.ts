@@ -51,6 +51,12 @@ export class StockfishAI implements ChessAI {
   }
 
   async selectMove(state: SuperChessState, color: PieceColor): Promise<Move> {
+    if (state.chess.turn !== color) {
+      throw new Error(
+        `StockfishAI.selectMove: chess.turn is ${state.chess.turn} but caller asked for ${color}. ` +
+        'Adjust state.chess.turn before calling.',
+      );
+    }
     if (!this.worker || !this.initialized) {
       return this.fallback.selectMove(state, color);
     }
@@ -70,7 +76,7 @@ export class StockfishAI implements ChessAI {
     return this.parseBestMove(moveStr, state, color);
   }
 
-  private parseBestMove(moveStr: string, state: SuperChessState, color: PieceColor): Move {
+  private parseBestMove(moveStr: string, state: SuperChessState, _color: PieceColor): Move {
     const from = algebraicToSquare(moveStr.slice(0, 2));
     const to = algebraicToSquare(moveStr.slice(2, 4));
     const promoChar = moveStr[4];

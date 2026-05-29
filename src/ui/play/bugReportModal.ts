@@ -13,6 +13,10 @@ import type { SuperChessState } from '../../game/types.ts';
 import type { BugReport, ValidationIssue } from '../../game/debug.ts';
 import { buildBugReport } from '../../game/debug.ts';
 import type { DebugLog } from './debugLog.ts';
+import {
+  submitBugReportToTrello,
+  BugReportSubmitError,
+} from './bugReportApi.ts';
 
 export interface BugReportOptions {
   state: SuperChessState;
@@ -148,17 +152,94 @@ export function showBugReportModal(opts: BugReportOptions): void {
   body.appendChild(renderRawJson(report));
 
   // --- footer (sticky actions) ---
+  //
+  // Two stacked rows so the "send to Trello" CTA gets its own line at
+  // the top (primary action, plus a status banner that grows under it
+  // on send / success / error). The bottom row keeps the unchanged
+  // copy / download buttons and the chat hint.
   const foot = document.createElement('footer');
   foot.style.cssText = `
     border-top: 1px solid var(--sc-border);
     padding: 14px 24px;
-    display: flex; gap: 10px; align-items: center;
+    display: flex; flex-direction: column; gap: 10px;
     background: var(--sc-panel);
   `;
   card.appendChild(foot);
 
+  const sendRow = document.createElement('div');
+  sendRow.style.cssText = 'display: flex; gap: 10px; align-items: center;';
+  foot.appendChild(sendRow);
+
+  const sendBtn = document.createElement('button');
+  sendBtn.className = 'sc-btn sc-btn--primary';
+  sendBtn.textContent = 'send to Trello \u2192';
+  sendBtn.title = 'Create a card on the Super Chess Trello board with this snapshot';
+  sendRow.appendChild(sendBtn);
+
+  // Status banner — empty until the first send attempt. Lives outside
+  // the button so it can persist after the button text resets.
+  const status = document.createElement('div');
+  status.style.cssText = `
+    flex: 1;
+    font-size: 12px; line-height: 1.5;
+    color: var(--sc-text-secondary);
+    font-family: system-ui, sans-serif;
+  `;
+  sendRow.appendChild(status);
+
+  let sending = false;
+  sendBtn.addEventListener('click', async () => {
+    if (sending) return;
+    sending = true;
+    sendBtn.disabled = true;
+    sendBtn.textContent = 'sending\u2026';
+    status.style.color = 'var(--sc-text-secondary)';
+    status.textContent = 'posting to Trello\u2026';
+    try {
+      const result = await submitBugReportToTrello(report);
+      status.style.color = 'var(--sc-text)';
+      if (result.url) {
+        // innerHTML is safe here: result.url comes straight from the
+        // Worker which only forwards Trello's response, and the link
+        // text is built from a stable shortLink (24-hex chars at most).
+        const safeUrl = result.url.replace(/"/g, '&quot;');
+        const label = result.shortLink ?? 'card';
+        status.innerHTML =
+          `\u2713 filed on Trello \u2014 ` +
+          `<a href="${safeUrl}" target="_blank" rel="noreferrer" ` +
+          `style="color: var(--sc-accent); text-decoration: underline;">` +
+          `view ${escapeHtml(label)} \u2192</a>`;
+      } else {
+        status.textContent = '\u2713 filed on Trello (no URL returned)';
+      }
+      sendBtn.textContent = 'sent \u2713';
+      // Leave the button disabled after a successful send so the user
+      // can't accidentally double-file the same snapshot. They can
+      // close the modal and re-open it to send a fresh report.
+    } catch (err) {
+      const e = err as BugReportSubmitError | Error;
+      status.style.color = 'var(--sc-accent-danger)';
+      const isConfigError =
+        err instanceof BugReportSubmitError && err.status === 503;
+      if (isConfigError) {
+        status.textContent =
+          '\u2715 Trello isn\u2019t configured on this deploy \u2014 use copy or download instead.';
+      } else {
+        status.textContent = `\u2715 ${e.message}`;
+      }
+      sendBtn.disabled = false;
+      sendBtn.textContent = 'retry send';
+      sending = false;
+    }
+  });
+
+  // --- bottom row: copy + download + hint -----------------------------
+  const actionsRow = document.createElement('div');
+  actionsRow.style.cssText = 'display: flex; gap: 10px; align-items: center;';
+  foot.appendChild(actionsRow);
+
   const copyBtn = document.createElement('button');
-  copyBtn.className = 'sc-btn sc-btn--primary';
+  copyBtn.className = 'sc-btn';
   copyBtn.textContent = 'copy report';
   copyBtn.addEventListener('click', async () => {
     const json = JSON.stringify(report, null, 2);
@@ -178,7 +259,7 @@ export function showBugReportModal(opts: BugReportOptions): void {
       setTimeout(() => { copyBtn.textContent = 'copy report'; }, 1600);
     }
   });
-  foot.appendChild(copyBtn);
+  actionsRow.appendChild(copyBtn);
 
   const downloadBtn = document.createElement('button');
   downloadBtn.className = 'sc-btn';
@@ -195,11 +276,11 @@ export function showBugReportModal(opts: BugReportOptions): void {
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
   });
-  foot.appendChild(downloadBtn);
+  actionsRow.appendChild(downloadBtn);
 
   const spacer = document.createElement('div');
   spacer.style.flex = '1';
-  foot.appendChild(spacer);
+  actionsRow.appendChild(spacer);
 
   const hint = document.createElement('div');
   hint.style.cssText = `
@@ -207,8 +288,8 @@ export function showBugReportModal(opts: BugReportOptions): void {
     color: var(--sc-text-muted);
     font-family: system-ui, sans-serif;
   `;
-  hint.textContent = 'paste the JSON into chat and we can debug it together';
-  foot.appendChild(hint);
+  hint.textContent = 'or paste the JSON into chat and we can debug it together';
+  actionsRow.appendChild(hint);
 
   const escHandler = (e: KeyboardEvent) => {
     if (e.key === 'Escape') close();

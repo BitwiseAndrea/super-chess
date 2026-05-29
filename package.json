@@ -14,6 +14,8 @@
     "sim": "tsx scripts/sim.ts",
     "export-stats": "tsx scripts/export-stats.ts",
     "benchmark": "tsx scripts/benchmark.ts",
+    "cards:sync": "tsx scripts/sync-cards-luau.ts",
+    "trello:lists": "tsx scripts/trello-lists.ts",
     "cf:dev": "wrangler dev",
     "cf:deploy": "wrangler deploy"
   },
@@ -26,6 +28,7 @@
     "@vitest/coverage-v8": "^4.1.7",
     "eslint": "^10.4.0",
     "eslint-config-prettier": "^10.1.8",
+    "globals": "^17.6.0",
     "prettier": "^3.8.3",
     "tsx": "^4.22.3",
     "typescript": "~6.0.2",
